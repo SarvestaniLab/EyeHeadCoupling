@@ -133,13 +133,14 @@ def load_feedback_data(folder_path: Path, animal_id: str = "Tsh001") -> Tuple[pd
         if n_cols < 4:
             raise ValueError(f"Too few columns: {n_cols}. Expected at least 4 (frame, timestamp, x, y)")
 
-        # Extract columns: first 2 are frame & timestamp, last is ignored, -2 is y, -3 is x
+        # Extract columns: frame, timestamp, x, y, diameter (5th column)
+        # Note: Using positive indexing for diameter to get 5th column (index 4)
         eye_df = pd.DataFrame({
             'frame': eye_arr[:, 0],
             'timestamp': eye_arr[:, 1],
-            'green_x': eye_arr[:, -3],
-            'green_y': eye_arr[:, -2],
-            'diameter': eye_arr[:, -4] if n_cols >= 4 else 0.2,
+            'green_x': eye_arr[:, 2],
+            'green_y': eye_arr[:, 3],
+            'diameter': eye_arr[:, 4] if n_cols >= 5 else 0.2,
         })
         eye_df['frame'] = eye_df['frame'].astype(int)
 
@@ -412,8 +413,10 @@ def extract_trial_trajectories(eot_df: pd.DataFrame, eye_df: pd.DataFrame,
             eye_x_full = np.array([])
             eye_y_full = np.array([])
             eye_times_full = np.array([])
+            eye_frames_full = np.array([])
             eye_start_time = start_time
             eye_end_time = end_time
+            cursor_diameter = 0.2  # Default cursor diameter
         else:
             # Calculate path length (cumulative distance along trajectory)
             start_eye_x = eye_trajectory['green_x'].values[0]
@@ -422,6 +425,12 @@ def extract_trial_trajectories(eot_df: pd.DataFrame, eye_df: pd.DataFrame,
             eye_start_time = eye_times_raw[0]
             eye_end_time = eye_times_raw[-1]
             eye_duration = eye_end_time - eye_start_time
+
+            # Extract cursor diameter (use first value from eye_trajectory)
+            cursor_diameter = eye_trajectory['diameter'].values[0]
+
+            # Extract frame numbers from eye_trajectory
+            eye_frames_raw = eye_trajectory['frame'].values
 
             # OPTION 2: Use the next row after the last position within trial window
             # Get the last row within the trial window
@@ -455,12 +464,14 @@ def extract_trial_trajectories(eot_df: pd.DataFrame, eye_df: pd.DataFrame,
             # This ensures no gap/jump between trajectory and final position marker
             eye_x_full = np.append(eye_trajectory['green_x'].values, final_eye_x)
             eye_y_full = np.append(eye_trajectory['green_y'].values, final_eye_y)
-            # Also append timestamp for the final position
+            # Also append timestamp and frame for the final position
             if eye_df_position + 1 < len(eye_df):
                 final_timestamp = eye_df.iloc[eye_df_position + 1]['timestamp']
                 eye_times_full = np.append(eye_times_raw, final_timestamp)
+                eye_frames_full = np.append(eye_frames_raw, final_eye_frame)
             else:
                 eye_times_full = eye_times_raw
+                eye_frames_full = eye_frames_raw
 
         if has_eye_data and len(eye_trajectory) > 1:
             dx = np.diff(eye_trajectory['green_x'].values)
@@ -529,6 +540,7 @@ def extract_trial_trajectories(eot_df: pd.DataFrame, eye_df: pd.DataFrame,
             'target_y': target_y,
             'target_diameter': target_diameter,
             'target_visible': target_visible,
+            'cursor_diameter': cursor_diameter,
             'start_eye_x': start_eye_x,
             'start_eye_y': start_eye_y,
             'final_eye_x': final_eye_x,
@@ -537,6 +549,7 @@ def extract_trial_trajectories(eot_df: pd.DataFrame, eye_df: pd.DataFrame,
             'eye_x': eye_x_full if has_eye_data else np.array([]),
             'eye_y': eye_y_full if has_eye_data else np.array([]),
             'eye_times': eye_times_full if has_eye_data else np.array([]),
+            'eye_frames': eye_frames_full if has_eye_data else np.array([]),
             'eye_start_time': eye_start_time,  # For relative time calculations
             'path_length': path_length,
             'straight_line_distance': straight_line_distance,
@@ -3351,99 +3364,64 @@ def interactive_fixation_viewer(trials: list[dict], animal_id: Optional[str] = N
         return
 
     print(f"Interactive Fixation Viewer: {len(trials_with_data)} trials")
-    print(f"Fixation criteria: ≥{min_duration}s duration, <{max_movement} units movement")
+    print(f"Fixation criteria: ≥{min_duration}s duration, frame-to-frame movement <{max_movement} units")
     print("Press SPACE to advance, ESC or 'q' to quit")
 
     fig, ax = plt.subplots(figsize=(12, 10))
     current_trial_idx = [0]  # Use list to allow modification in nested function
 
     def detect_fixations(eye_x, eye_y, eye_times):
-        """Detect fixation windows in the trajectory.
-        
+        """Detect fixation windows based on frame-to-frame movement velocity.
+
+        A fixation is a continuous segment where every consecutive frame-to-frame
+        movement is < max_movement, lasting for at least min_duration.
+
         Returns list of tuples: (start_idx, end_idx, duration, span)
-        where span is the maximum spatial movement during the fixation.
+        where span is calculated for informational purposes but NOT used for detection.
         """
         if len(eye_x) < 2:
             return []
 
-        fixations = []
         n = len(eye_x)
+        fixations = []
 
-        # For each potential starting point
-        for i in range(n):
-            # Try to find the longest fixation starting at i
-            for j in range(i + 1, n + 1):
-                # Check if this window meets criteria
-                window_x = eye_x[i:j]
-                window_y = eye_y[i:j]
-                window_times = eye_times[i:j]
+        i = 0
+        while i < n:
+            # Try to extend a fixation starting at point i
+            j = i + 1
 
-                # Calculate duration
-                duration = window_times[-1] - window_times[0]
+            # Extend while frame-to-frame movement is below threshold
+            while j < n:
+                # Calculate movement from point j-1 to point j
+                dx = eye_x[j] - eye_x[j-1]
+                dy = eye_y[j] - eye_y[j-1]
+                movement = np.sqrt(dx**2 + dy**2)
 
-                if duration < min_duration:
-                    continue  # Too short
-
-                # Calculate maximum movement in this window
-                x_range = np.max(window_x) - np.min(window_x)
-                y_range = np.max(window_y) - np.min(window_y)
-                max_move = np.sqrt(x_range**2 + y_range**2)
-
-                if max_move < max_movement:
-                    # This is a valid fixation
-                    # Check if we can extend it further
-                    continue
+                if movement < max_movement:
+                    j += 1  # Include point j in the fixation
                 else:
-                    # Can't extend anymore, check if previous window was valid
-                    if j > i + 1:  # At least 2 points
-                        prev_window_x = eye_x[i:j-1]
-                        prev_window_y = eye_y[i:j-1]
-                        prev_window_times = eye_times[i:j-1]
-                        prev_duration = prev_window_times[-1] - prev_window_times[0]
-                        if prev_duration >= min_duration:
-                            # Calculate span for previous window
-                            prev_x_range = np.max(prev_window_x) - np.min(prev_window_x)
-                            prev_y_range = np.max(prev_window_y) - np.min(prev_window_y)
-                            prev_span = np.sqrt(prev_x_range**2 + prev_y_range**2)
-                            fixations.append((i, j-1, prev_duration, prev_span))
-                    break
+                    break  # Movement too large, stop before point j
 
-            # Check if we reached the end with a valid fixation
-            if j == n:
+            # Now we have a potential fixation from index i to j (exclusive end)
+            # This includes points [i, i+1, ..., j-1]
+
+            if j > i + 1:  # At least 2 points
                 duration = eye_times[j-1] - eye_times[i]
                 if duration >= min_duration:
-                    window_x = eye_x[i:j]
-                    window_y = eye_y[i:j]
-                    x_range = np.max(window_x) - np.min(window_x)
-                    y_range = np.max(window_y) - np.min(window_y)
-                    max_move = np.sqrt(x_range**2 + y_range**2)
-                    if max_move < max_movement:
-                        fixations.append((i, j, duration, max_move))
+                    # Valid fixation! Calculate span for informational purposes
+                    fix_x = eye_x[i:j]
+                    fix_y = eye_y[i:j]
+                    x_range = np.max(fix_x) - np.min(fix_x)
+                    y_range = np.max(fix_y) - np.min(fix_y)
+                    span = np.sqrt(x_range**2 + y_range**2)
+                    fixations.append((i, j, duration, span))
+                    i = j  # Start next search after this fixation
+                else:
+                    i += 1  # Duration too short, try next starting point
+            else:
+                i += 1  # No valid extension, try next starting point
 
-        # Remove overlapping fixations, keep longest
-        if len(fixations) == 0:
-            return []
-
-        # Sort by duration (longest first)
-        fixations.sort(key=lambda x: x[2], reverse=True)
-
-        # Remove overlaps
-        final_fixations = []
-        used_indices = set()
-
-        for start, end, duration, span in fixations:
-            # Check if any index in this range is already used
-            if any(idx in used_indices for idx in range(start, end)):
-                continue
-
-            # Add this fixation
-            final_fixations.append((start, end, duration, span))
-            used_indices.update(range(start, end))
-
-        # Sort by start index
-        final_fixations.sort(key=lambda x: x[0])
-
-        return final_fixations
+        return fixations
 
     def plot_trial(idx):
         ax.clear()
@@ -3455,7 +3433,11 @@ def interactive_fixation_viewer(trials: list[dict], animal_id: Optional[str] = N
         target_x = trial['target_x']
         target_y = trial['target_y']
         target_diameter = trial['target_diameter']
+        target_radius = target_diameter / 2.0
+        cursor_radius = trial.get('cursor_diameter', 0.2) / 2.0
+        contact_threshold = target_radius + cursor_radius
         trial_num = trial.get('trial_number', idx + 1)
+        trial_end_time = trial.get('end_time', eye_times[-1] if len(eye_times) > 0 else 0)
 
         is_failed = trial.get('trial_failed', False)
         target_visible = trial.get('target_visible', 1)
@@ -3480,21 +3462,42 @@ def interactive_fixation_viewer(trials: list[dict], animal_id: Optional[str] = N
             ax.plot(non_fixation_x, non_fixation_y, 'o', color='gray',
                    markersize=4, alpha=0.5, label='Non-fixation', zorder=2)
 
-        # Highlight fixation points with colormap (early = purple/blue, late = yellow/red)
-        cmap = plt.cm.coolwarm  # or try: viridis, inferno, plasma, coolwarm
+        # Highlight fixation points with colormap (early = purple/blue, late = yellow)
+        # Use colormap that doesn't include red
+        cmap = plt.cm.viridis  # viridis goes from purple to yellow, no red
         n_fixations = len(fixations)
-        
+        n_missed = 0
+
         for fix_idx, (start, end, duration, span) in enumerate(fixations):
             fix_x = eye_x[start:end]
             fix_y = eye_y[start:end]
-            
-            # Map fixation index to colormap (0 to 1)
-            color_val = fix_idx / max(1, n_fixations - 1) if n_fixations > 1 else 0.5
-            color = cmap(color_val)
+            fix_times = eye_times[start:end]
+
+            # Calculate distances from target for all points in fixation
+            fix_distances = np.sqrt((fix_x - target_x)**2 + (fix_y - target_y)**2)
+            all_points_within_target = np.all(fix_distances <= contact_threshold)
+
+            # Calculate time from end of fixation to end of trial
+            fixation_end_time = fix_times[-1]
+            time_to_trial_end = trial_end_time - fixation_end_time
+
+            # Check if this is a potential missed detection
+            is_potential_missed = (all_points_within_target and time_to_trial_end > 0.5)
+
+            if is_potential_missed:
+                # Color potentially missed fixations in RED
+                color = 'red'
+                n_missed += 1
+                label = f'Fixation {fix_idx+1} - POTENTIALLY MISSED ({duration:.2f}s, span={span:.4f})'
+            else:
+                # Use colormap for other fixations (avoiding red)
+                color_val = fix_idx / max(1, n_fixations - 1) if n_fixations > 1 else 0.5
+                color = cmap(color_val)
+                label = f'Fixation {fix_idx+1} ({duration:.2f}s, span={span:.4f})'
 
             # Plot fixation points (large, bright)
             ax.plot(fix_x, fix_y, 'o', color=color, markersize=10, alpha=0.8,
-                   label=f'Fixation {fix_idx+1} ({duration:.2f}s, span={span:.4f})', zorder=4)
+                   label=label, zorder=4)
 
             # Calculate and plot fixation center
             fix_center_x = np.mean(fix_x)
@@ -3502,16 +3505,28 @@ def interactive_fixation_viewer(trials: list[dict], animal_id: Optional[str] = N
             ax.plot(fix_center_x, fix_center_y, 'x', color=color, markersize=15,
                    markeredgewidth=3, zorder=5)
 
+            # Add text label for potentially missed fixations
+            if is_potential_missed:
+                ax.text(fix_center_x, fix_center_y + 0.1, 'MISSED?',
+                       color='red', fontsize=12, fontweight='bold',
+                       ha='center', va='bottom', zorder=6)
+
         # Plot start position
         start_x = eye_x[0]
         start_y = eye_y[0]
         ax.plot(start_x, start_y, 'go', markersize=12, label='Start', zorder=3)
 
         # Plot target
-        target_circle = Circle((target_x, target_y), radius=target_diameter/2,
-                              fill=False, edgecolor='red', linewidth=2, linestyle='-')
+        target_circle = Circle((target_x, target_y), radius=target_radius,
+                              fill=False, edgecolor='red', linewidth=2, linestyle='-', label='Target')
         ax.add_patch(target_circle)
-        ax.plot(target_x, target_y, 'r*', markersize=15, label='Target', zorder=5)
+        ax.plot(target_x, target_y, 'r*', markersize=15, zorder=5)
+
+        # Plot contact threshold circle (target + cursor radius)
+        contact_circle = Circle((target_x, target_y), radius=contact_threshold,
+                               fill=False, edgecolor='orange', linewidth=2, linestyle='--',
+                               label=f'Contact threshold ({contact_threshold:.4f})', alpha=0.7)
+        ax.add_patch(contact_circle)
 
         # Plot final position
         final_x = trial.get('final_eye_x', eye_x[-1])
@@ -3526,6 +3541,9 @@ def interactive_fixation_viewer(trials: list[dict], animal_id: Optional[str] = N
         success_str = 'FAILED' if is_failed else 'SUCCESS'
         title = f'Trial {trial_num} (showing {idx + 1}/{len(trials_with_data)}) - Target: {visibility_str} - Status: {success_str}\n'
         title += f'{len(fixations)} fixation(s) detected'
+        if n_missed > 0:
+            title += f' ({n_missed} potentially missed)'
+        title += f'\nContact threshold: {contact_threshold:.4f} = target_r({target_radius:.4f}) + cursor_r({cursor_radius:.4f})'
 
         if animal_id or session_date:
             title = f'{animal_id} {session_date}\n{title}'
@@ -3551,6 +3569,928 @@ def interactive_fixation_viewer(trials: list[dict], animal_id: Optional[str] = N
     # Plot first trial
     plot_trial(0)
     plt.show()
+
+
+def save_detailed_fixation_data(trials: list[dict], results_dir: Optional[Path] = None,
+                                  animal_id: Optional[str] = None, session_date: str = "",
+                                  min_duration: float = FIXATION_MIN_DURATION,
+                                  max_movement: float = FIXATION_MAX_MOVEMENT) -> pd.DataFrame:
+    """Save detailed frame-by-frame fixation data for all trials.
+
+    For each detected fixation, saves all individual data points including:
+    - Trial number
+    - Fixation number (within that trial)
+    - Frame number (absolute frame number from vstim_go CSV)
+    - Eye position (x, y)
+    - Distance from target
+    - Time (if available)
+
+    Parameters
+    ----------
+    trials : list of dict
+        List of trial data dictionaries
+    results_dir : Path, optional
+        Directory to save CSV file. If None, doesn't save to disk.
+    animal_id : str, optional
+        Animal identifier for filename
+    session_date : str, optional
+        Session date for filename
+    min_duration : float
+        Minimum fixation duration in seconds (default: 0.5)
+    max_movement : float
+        Maximum movement threshold for fixation in stimulus units (default: 0.12)
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with columns: trial_number, fixation_number, frame_number,
+        eye_x, eye_y, distance_from_target, time_sec, target_x, target_y,
+        target_radius, cursor_radius, contact_threshold, target_visible, trial_failed,
+        fixation_duration, fixation_span, all_points_within_target, etc.
+
+    Notes
+    -----
+    A fixation point is considered "on target" when the eye-to-target distance is
+    <= (target_radius + cursor_radius), accounting for both target and cursor sizes.
+    """
+    import pandas as pd
+
+    def detect_fixations(eye_x, eye_y, eye_times):
+        """Detect fixation windows based on frame-to-frame movement velocity.
+
+        A fixation is a continuous segment where every consecutive frame-to-frame
+        movement is < max_movement, lasting for at least min_duration.
+
+        Returns list of tuples: (start_idx, end_idx, duration, span)
+        where span is calculated for informational purposes but NOT used for detection.
+        """
+        if len(eye_x) < 2:
+            return []
+
+        n = len(eye_x)
+        fixations = []
+
+        i = 0
+        while i < n:
+            # Try to extend a fixation starting at point i
+            j = i + 1
+
+            # Extend while frame-to-frame movement is below threshold
+            while j < n:
+                # Calculate movement from point j-1 to point j
+                dx = eye_x[j] - eye_x[j-1]
+                dy = eye_y[j] - eye_y[j-1]
+                movement = np.sqrt(dx**2 + dy**2)
+
+                if movement < max_movement:
+                    j += 1  # Include point j in the fixation
+                else:
+                    break  # Movement too large, stop before point j
+
+            # Now we have a potential fixation from index i to j (exclusive end)
+            # This includes points [i, i+1, ..., j-1]
+
+            if j > i + 1:  # At least 2 points
+                duration = eye_times[j-1] - eye_times[i]
+                if duration >= min_duration:
+                    # Valid fixation! Calculate span for informational purposes
+                    fix_x = eye_x[i:j]
+                    fix_y = eye_y[i:j]
+                    x_range = np.max(fix_x) - np.min(fix_x)
+                    y_range = np.max(fix_y) - np.min(fix_y)
+                    span = np.sqrt(x_range**2 + y_range**2)
+                    fixations.append((i, j, duration, span))
+                    i = j  # Start next search after this fixation
+                else:
+                    i += 1  # Duration too short, try next starting point
+            else:
+                i += 1  # No valid extension, try next starting point
+
+        return fixations
+
+    # Filter to trials with eye data
+    trials_with_data = [t for t in trials if len(t.get('eye_x', [])) > 0]
+
+    if len(trials_with_data) == 0:
+        print("No trials with eye tracking data")
+        return pd.DataFrame()
+
+    print(f"Processing {len(trials_with_data)} trials for detailed fixation data...")
+    print(f"Fixation criteria: ≥{min_duration}s duration, frame-to-frame movement <{max_movement} units")
+
+    # Collect all data points for all fixations
+    all_fixation_data = []
+    total_fixations = 0
+
+    for trial in trials_with_data:
+        eye_x = np.array(trial['eye_x'])
+        eye_y = np.array(trial['eye_y'])
+        eye_times = np.array(trial.get('eye_times', np.arange(len(eye_x))))
+        eye_frames = np.array(trial.get('eye_frames', np.arange(len(eye_x))))  # Absolute frame numbers
+        target_x = trial['target_x']
+        target_y = trial['target_y']
+        target_radius = trial['target_diameter'] / 2.0
+        cursor_radius = trial.get('cursor_diameter', 0.2) / 2.0  # Default to 0.2 if not present
+        trial_num = trial.get('trial_number', 0)
+        target_visible = trial.get('target_visible', 1)
+        trial_failed = trial.get('trial_failed', False)
+        trial_duration = trial.get('duration', 0)
+        trial_end_time = trial.get('end_time', eye_times[-1] if len(eye_times) > 0 else 0)
+
+        # Detect fixations for this trial
+        fixations = detect_fixations(eye_x, eye_y, eye_times)
+
+        # For each fixation, save all individual data points
+        for fix_num, (start_idx, end_idx, duration, span) in enumerate(fixations, start=1):
+            total_fixations += 1
+
+            # Calculate fixation-level metrics
+            fix_x = eye_x[start_idx:end_idx]
+            fix_y = eye_y[start_idx:end_idx]
+            fix_times = eye_times[start_idx:end_idx]
+
+            # Calculate distances from target for all points in fixation
+            fix_distances = np.sqrt((fix_x - target_x)**2 + (fix_y - target_y)**2)
+            max_dist_in_fixation = np.max(fix_distances)
+            min_dist_in_fixation = np.min(fix_distances)
+
+            # Check if ALL points are within target radius + cursor radius (i.e., cursor touching target)
+            # A point is "on target" when the distance from eye to target center <= (target_radius + cursor_radius)
+            contact_threshold = target_radius + cursor_radius
+            all_points_within_target = np.all(fix_distances <= contact_threshold)
+
+            # Calculate time from end of fixation to end of trial
+            fixation_end_time = fix_times[-1]
+            time_to_trial_end = trial_end_time - fixation_end_time
+
+            # Determine if this is a potential missed detection
+            # Criteria: fixation is on target (all points within radius) AND
+            #           trial doesn't end promptly (>0.5s after fixation ends)
+            is_potential_missed_detection = (all_points_within_target and
+                                            time_to_trial_end > 0.5)
+
+            # Iterate through all frames in this fixation
+            for idx_within_fixation, frame_idx in enumerate(range(start_idx, end_idx)):
+                pos_x = eye_x[frame_idx]
+                pos_y = eye_y[frame_idx]
+                time_sec = eye_times[frame_idx]
+                absolute_frame = int(eye_frames[frame_idx])  # Absolute frame number from vstim_go
+
+                # Calculate distance from target for this specific point
+                distance_from_target = np.sqrt((pos_x - target_x)**2 + (pos_y - target_y)**2)
+
+                # Point-specific temporal metrics
+                time_since_fixation_start = time_sec - fix_times[0]
+                time_until_fixation_end = fixation_end_time - time_sec
+
+                # Point-specific spatial metrics
+                point_within_target = distance_from_target <= contact_threshold
+
+                # Frame-to-frame movement (velocity) at this point
+                if frame_idx > start_idx:
+                    prev_x = eye_x[frame_idx - 1]
+                    prev_y = eye_y[frame_idx - 1]
+                    frame_to_frame_movement = np.sqrt((pos_x - prev_x)**2 + (pos_y - prev_y)**2)
+                else:
+                    frame_to_frame_movement = 0.0  # First point has no previous movement
+
+                # Add data point to list
+                all_fixation_data.append({
+                    'trial_number': trial_num,
+                    'fixation_number': fix_num,
+                    'frame_number': absolute_frame,
+                    'point_index_in_fixation': idx_within_fixation,
+                    'eye_x': pos_x,
+                    'eye_y': pos_y,
+                    'distance_from_target': distance_from_target,
+                    'point_within_target': point_within_target,
+                    'frame_to_frame_movement': frame_to_frame_movement,
+                    'time_sec': time_sec,
+                    'time_since_fixation_start': time_since_fixation_start,
+                    'time_until_fixation_end': time_until_fixation_end,
+                    'target_x': target_x,
+                    'target_y': target_y,
+                    'target_radius': target_radius,
+                    'cursor_radius': cursor_radius,
+                    'contact_threshold': contact_threshold,
+                    'target_visible': target_visible,
+                    'trial_failed': trial_failed,
+                    'trial_duration': trial_duration,
+                    'fixation_duration': duration,
+                    'fixation_span': span,
+                    'fixation_start_time': fix_times[0],
+                    'fixation_end_time': fixation_end_time,
+                    'all_points_within_target': all_points_within_target,
+                    'max_distance_from_target_in_fixation': max_dist_in_fixation,
+                    'min_distance_from_target_in_fixation': min_dist_in_fixation,
+                    'time_from_fixation_end_to_trial_end': time_to_trial_end,
+                    'is_potential_missed_detection': is_potential_missed_detection
+                })
+
+    # Create DataFrame
+    df = pd.DataFrame(all_fixation_data)
+
+    print(f"Found {total_fixations} fixations across {len(trials_with_data)} trials")
+    print(f"Total data points: {len(df)}")
+
+    # Summary of on-target fixations and potential missed detections
+    if len(df) > 0:
+        # Group by trial and fixation to get unique fixations (not individual frames)
+        fixation_summary = df.groupby(['trial_number', 'fixation_number']).first()
+
+        n_on_target = fixation_summary['all_points_within_target'].sum()
+        n_missed = fixation_summary['is_potential_missed_detection'].sum()
+
+        print(f"\nFixation Analysis:")
+        print(f"  Fixations with all points within target: {n_on_target}/{len(fixation_summary)} ({100*n_on_target/len(fixation_summary):.1f}%)")
+        print(f"  Potential missed detections (on-target but trial continued >0.5s): {n_missed}/{n_on_target} ({100*n_missed/n_on_target:.1f}% of on-target)" if n_on_target > 0 else f"  Potential missed detections: {n_missed}")
+
+        if n_missed > 0:
+            missed_fixations = fixation_summary[fixation_summary['is_potential_missed_detection']]
+            print(f"\n  Missed detection details:")
+            print(f"    Mean time from fixation end to trial end: {missed_fixations['time_from_fixation_end_to_trial_end'].mean():.2f}s")
+            print(f"    Trials with missed detections: {missed_fixations.index.get_level_values('trial_number').nunique()}")
+
+    # Save to CSV if results_dir is provided
+    if results_dir is not None:
+        results_dir = Path(results_dir)
+        results_dir.mkdir(parents=True, exist_ok=True)
+
+        filename = f"{animal_id}_detailed_fixation_data.csv" if animal_id else "detailed_fixation_data.csv"
+        if session_date:
+            filename = f"{animal_id}_{session_date}_detailed_fixation_data.csv"
+
+        filepath = results_dir / filename
+        df.to_csv(filepath, index=False)
+        print(f"Saved detailed fixation data to: {filepath}")
+
+    return df
+
+
+def create_vstim_go_fixation_csv(folder_path: Path, results_dir: Optional[Path] = None,
+                                   animal_id: Optional[str] = None, session_date: str = "",
+                                   min_duration: float = FIXATION_MIN_DURATION,
+                                   max_movement: float = FIXATION_MAX_MOVEMENT) -> pd.DataFrame:
+    """Create frame-by-frame CSV from vstim_go with fixation detection and target metrics.
+
+    This function processes ALL frames from vstim_go (not just fixation points) and adds:
+    - Frame-to-frame movement (velocity)
+    - Which trial the frame belongs to
+    - Target information for that trial
+    - Whether the frame is part of a detected fixation
+    - Distance from target and contact threshold
+    - Whether the frame is within contact threshold
+
+    Parameters
+    ----------
+    folder_path : Path
+        Path to session folder containing vstim_go, vstim_cue, endoftrial CSVs
+    results_dir : Path, optional
+        Directory to save output CSV
+    animal_id : str, optional
+        Animal identifier for filename
+    session_date : str, optional
+        Session date for filename
+    min_duration : float
+        Minimum fixation duration in seconds (default: 0.5)
+    max_movement : float
+        Maximum frame-to-frame movement for fixation (default: 0.12)
+
+    Returns
+    -------
+    pd.DataFrame
+        Frame-by-frame data with fixation detection and target metrics
+    """
+    import pandas as pd
+
+    print(f"\nCreating vstim_go_fixation CSV...")
+    print(f"Fixation criteria: ≥{min_duration}s duration, frame-to-frame movement <{max_movement} units")
+
+    # Load the CSV files
+    folder_path = Path(folder_path)
+    files = list(folder_path.glob("*.csv"))
+
+    vstim_go_file = None
+    vstim_cue_file = None
+    eot_file = None
+
+    for f in files:
+        fname = f.name.lower()
+        if "vstim_go" in fname:
+            vstim_go_file = f
+        elif "vstim_cue" in fname:
+            vstim_cue_file = f
+        elif "endoftrial" in fname or "end_of_trial" in fname:
+            eot_file = f
+
+    if vstim_go_file is None:
+        raise FileNotFoundError(f"Could not find vstim_go file in {folder_path}")
+    if vstim_cue_file is None:
+        raise FileNotFoundError(f"Could not find vstim_cue file in {folder_path}")
+    if eot_file is None:
+        raise FileNotFoundError(f"Could not find endoftrial file in {folder_path}")
+
+    # Load vstim_go
+    print(f"Loading {vstim_go_file.name}...")
+    cleaned = clean_csv(str(vstim_go_file))
+    eye_arr = np.genfromtxt(cleaned, delimiter=",", skip_header=1, dtype=float)
+    if eye_arr.ndim == 1:
+        eye_arr = eye_arr.reshape(1, -1)
+
+    eye_df = pd.DataFrame({
+        'frame': eye_arr[:, 0].astype(int),
+        'timestamp': eye_arr[:, 1],
+        'eye_x': eye_arr[:, 2],
+        'eye_y': eye_arr[:, 3],
+        'cursor_diameter': eye_arr[:, 4] if eye_arr.shape[1] >= 5 else 0.2,
+    })
+
+    # Load vstim_cue
+    print(f"Loading {vstim_cue_file.name}...")
+    cleaned = clean_csv(str(vstim_cue_file))
+    target_arr = np.genfromtxt(cleaned, delimiter=",", skip_header=1, dtype=float)
+    if target_arr.ndim == 1:
+        target_arr = target_arr.reshape(1, -1)
+
+    n_cols = target_arr.shape[1]
+    if n_cols == 6:
+        target_df = pd.DataFrame(target_arr, columns=['frame', 'timestamp', 'target_x', 'target_y', 'target_diameter', 'visible'])
+    elif n_cols == 5:
+        target_df = pd.DataFrame(target_arr, columns=['frame', 'timestamp', 'target_x', 'target_y', 'target_diameter'])
+        target_df['visible'] = 1
+    else:
+        raise ValueError(f"Unexpected number of columns in vstim_cue: {n_cols}")
+
+    target_df['frame'] = target_df['frame'].astype(int)
+    target_df = target_df.drop_duplicates(subset=['frame'], keep='first')
+
+    # Load endoftrial
+    print(f"Loading {eot_file.name}...")
+    cleaned = clean_csv(str(eot_file))
+    eot_arr = np.genfromtxt(cleaned, delimiter=",", skip_header=1, dtype=float)
+    if eot_arr.ndim == 1:
+        eot_arr = eot_arr.reshape(1, -1)
+
+    # Handle variable number of columns in endoftrial (only need first 2)
+    n_cols_eot = eot_arr.shape[1]
+    if n_cols_eot >= 2:
+        eot_df = pd.DataFrame({
+            'frame': eot_arr[:, 0].astype(int),
+            'timestamp': eot_arr[:, 1]
+        })
+    else:
+        raise ValueError(f"endoftrial file has too few columns: {n_cols_eot}")
+
+    # Match each vstim_go frame to a trial
+    print("Matching frames to trials...")
+    eye_df['trial_number'] = 0
+    eye_df['target_x'] = np.nan
+    eye_df['target_y'] = np.nan
+    eye_df['target_diameter'] = np.nan
+    eye_df['target_visible'] = 0
+    eye_df['trial_start_frame'] = 0
+    eye_df['trial_end_frame'] = 0
+
+    for trial_idx in range(len(target_df)):
+        start_frame = target_df.iloc[trial_idx]['frame']
+        end_frame = eot_df.iloc[trial_idx]['frame'] if trial_idx < len(eot_df) else eye_df['frame'].max()
+
+        mask = (eye_df['frame'] >= start_frame) & (eye_df['frame'] <= end_frame)
+        eye_df.loc[mask, 'trial_number'] = trial_idx + 1
+        eye_df.loc[mask, 'target_x'] = target_df.iloc[trial_idx]['target_x']
+        eye_df.loc[mask, 'target_y'] = target_df.iloc[trial_idx]['target_y']
+        eye_df.loc[mask, 'target_diameter'] = target_df.iloc[trial_idx]['target_diameter']
+        eye_df.loc[mask, 'target_visible'] = target_df.iloc[trial_idx]['visible']
+        eye_df.loc[mask, 'trial_start_frame'] = start_frame
+        eye_df.loc[mask, 'trial_end_frame'] = end_frame
+
+    # Calculate frame-to-frame movement
+    print("Calculating frame-to-frame movement...")
+    eye_df['frame_to_frame_movement'] = 0.0
+    eye_df.loc[1:, 'frame_to_frame_movement'] = np.sqrt(
+        np.diff(eye_df['eye_x'])**2 + np.diff(eye_df['eye_y'])**2
+    )
+
+    # Calculate distance from target and contact threshold
+    print("Calculating distance from target...")
+    eye_df['target_radius'] = eye_df['target_diameter'] / 2.0
+    eye_df['cursor_radius'] = eye_df['cursor_diameter'] / 2.0
+    eye_df['contact_threshold'] = eye_df['target_radius'] + eye_df['cursor_radius']
+    eye_df['distance_from_target'] = np.sqrt(
+        (eye_df['eye_x'] - eye_df['target_x'])**2 +
+        (eye_df['eye_y'] - eye_df['target_y'])**2
+    )
+    eye_df['within_contact_threshold'] = eye_df['distance_from_target'] <= eye_df['contact_threshold']
+
+    # Initialize fixation columns
+    eye_df['in_fixation'] = False
+    eye_df['fixation_id'] = 0
+    eye_df['point_index_in_fixation'] = 0
+    eye_df['time_since_fixation_start'] = 0.0
+
+    # Detect fixations per trial
+    print("Detecting fixations...")
+
+    def detect_fixations_for_trial(trial_mask):
+        """Detect fixations for frames in a single trial."""
+        trial_data = eye_df[trial_mask].copy()
+        if len(trial_data) < 2:
+            return []
+
+        eye_x = trial_data['eye_x'].values
+        eye_y = trial_data['eye_y'].values
+        eye_times = trial_data['timestamp'].values
+        indices = trial_data.index.values
+
+        fixations = []  # List of (start_idx, end_idx, start_time)
+
+        i = 0
+        n = len(eye_x)
+        while i < n:
+            j = i + 1
+            while j < n:
+                dx = eye_x[j] - eye_x[j-1]
+                dy = eye_y[j] - eye_y[j-1]
+                movement = np.sqrt(dx**2 + dy**2)
+
+                if movement < max_movement:
+                    j += 1
+                else:
+                    break
+
+            if j > i + 1:
+                duration = eye_times[j-1] - eye_times[i]
+                if duration >= min_duration:
+                    fixations.append((indices[i], indices[j-1], eye_times[i]))
+                    i = j
+                else:
+                    i += 1
+            else:
+                i += 1
+
+        return fixations
+
+    # Process each trial
+    for trial_num in eye_df['trial_number'].unique():
+        if trial_num == 0:  # Skip inter-trial intervals
+            continue
+
+        trial_mask = eye_df['trial_number'] == trial_num
+        fixations = detect_fixations_for_trial(trial_mask)
+
+        for fix_id, (start_idx, end_idx, start_time) in enumerate(fixations, start=1):
+            # Mark frames as in fixation
+            fix_mask = (eye_df.index >= start_idx) & (eye_df.index <= end_idx)
+            eye_df.loc[fix_mask, 'in_fixation'] = True
+            eye_df.loc[fix_mask, 'fixation_id'] = fix_id
+
+            # Calculate point index and time since fixation start
+            for idx, (row_idx, row) in enumerate(eye_df[fix_mask].iterrows()):
+                eye_df.at[row_idx, 'point_index_in_fixation'] = idx
+                eye_df.at[row_idx, 'time_since_fixation_start'] = row['timestamp'] - start_time
+
+    print(f"Processed {len(eye_df)} frames across {eye_df['trial_number'].nunique() - 1} trials")
+    print(f"Detected {eye_df['in_fixation'].sum()} frames in fixations")
+
+    # Save to CSV
+    if results_dir is not None:
+        results_dir = Path(results_dir)
+        results_dir.mkdir(parents=True, exist_ok=True)
+
+        filename = f"{animal_id}_vstim_go_fixation.csv" if animal_id else "vstim_go_fixation.csv"
+        if session_date:
+            filename = f"{animal_id}_{session_date}_vstim_go_fixation.csv"
+
+        filepath = results_dir / filename
+        eye_df.to_csv(filepath, index=False)
+        print(f"Saved vstim_go_fixation CSV to: {filepath}")
+
+    return eye_df
+
+
+def compare_fixation_detection(folder_path: Path, vstim_go_fixation_df: Optional[pd.DataFrame] = None,
+                                results_dir: Optional[Path] = None,
+                                animal_id: Optional[str] = None, session_date: str = "") -> pd.DataFrame:
+    """Compare offline fixation detection with task's real-time fixation log.
+
+    Compares fixations detected by our analysis (vstim_go_fixation) with those
+    detected in real-time by the task (fixationlog.csv).
+
+    Parameters
+    ----------
+    folder_path : Path
+        Path to session folder containing fixationlog.csv
+    vstim_go_fixation_df : pd.DataFrame, optional
+        DataFrame from create_vstim_go_fixation_csv (if already loaded)
+    results_dir : Path, optional
+        Directory to save comparison CSV
+    animal_id : str, optional
+        Animal identifier for filename
+    session_date : str, optional
+        Session date for filename
+
+    Returns
+    -------
+    pd.DataFrame
+        Comparison results per trial
+    """
+    import pandas as pd
+
+    print(f"\nComparing fixation detection...")
+    folder_path = Path(folder_path)
+
+    # Load fixationlog.csv from task
+    fixlog_file = None
+    for f in folder_path.glob("*fixationlog*.csv"):
+        fixlog_file = f
+        break
+
+    if fixlog_file is None:
+        print("  No fixationlog.csv found in folder - cannot compare")
+        return pd.DataFrame()
+
+    print(f"  Loading task fixation log: {fixlog_file.name}")
+    try:
+        fixlog_df = pd.read_csv(fixlog_file)
+        print(f"    Loaded {len(fixlog_df)} fixation events from task")
+    except Exception as e:
+        print(f"    Error loading fixationlog: {e}")
+        return pd.DataFrame()
+
+    # Load vstim_go_fixation if not provided
+    if vstim_go_fixation_df is None:
+        vstim_go_fix_file = None
+        for f in (results_dir or folder_path).glob("*vstim_go_fixation*.csv"):
+            vstim_go_fix_file = f
+            break
+
+        if vstim_go_fix_file is None:
+            print("  No vstim_go_fixation.csv found - run create_vstim_go_fixation_csv first")
+            return pd.DataFrame()
+
+        print(f"  Loading offline fixation analysis: {vstim_go_fix_file.name}")
+        vstim_go_fixation_df = pd.read_csv(vstim_go_fix_file)
+
+    # Get our detected fixations (grouped by trial and fixation_id)
+    our_fixations = vstim_go_fixation_df[
+        (vstim_go_fixation_df['in_fixation'] == True) &
+        (vstim_go_fixation_df['trial_number'] > 0)
+    ].copy()
+
+    # Group by trial and fixation to get fixation summaries
+    our_fix_summary = our_fixations.groupby(['trial_number', 'fixation_id']).agg({
+        'timestamp': ['min', 'max', 'count'],
+        'within_contact_threshold': 'all',  # All points on target?
+        'distance_from_target': 'mean'
+    }).reset_index()
+
+    our_fix_summary.columns = ['trial_number', 'fixation_id', 'start_time', 'end_time',
+                                'n_frames', 'all_on_target', 'mean_distance']
+    our_fix_summary['duration'] = our_fix_summary['end_time'] - our_fix_summary['start_time']
+
+    print(f"    Our offline analysis: {len(our_fix_summary)} fixations across {our_fix_summary['trial_number'].nunique()} trials")
+
+    # Analyze task's fixation log by trial
+    # (Structure depends on what's in fixationlog.csv - you may need to adjust this)
+    trial_col = None
+    for col in ['trial', 'trial_number', 'trial_num']:
+        if col in fixlog_df.columns:
+            trial_col = col
+            break
+
+    if trial_col:
+        task_fixations_per_trial = fixlog_df.groupby(trial_col).size()
+        print(f"    Task real-time: {len(fixlog_df)} fixation events across {task_fixations_per_trial.index.nunique()} trials")
+    else:
+        print(f"    Task real-time: {len(fixlog_df)} fixation events (no trial column found)")
+        task_fixations_per_trial = pd.Series()
+
+    # Compare by trial
+    comparison_data = []
+
+    for trial_num in our_fix_summary['trial_number'].unique():
+        our_trial_fixes = our_fix_summary[our_fix_summary['trial_number'] == trial_num]
+        n_our_fixes = len(our_trial_fixes)
+        n_our_on_target = our_trial_fixes['all_on_target'].sum()
+
+        # Get task fixations for this trial
+        if trial_col:
+            task_trial_fixes = fixlog_df[fixlog_df[trial_col] == trial_num]
+            n_task_fixes = len(task_trial_fixes)
+        else:
+            n_task_fixes = 0  # Can't match without trial info
+
+        comparison_data.append({
+            'trial_number': trial_num,
+            'our_fixations': n_our_fixes,
+            'our_on_target_fixations': n_our_on_target,
+            'task_fixations': n_task_fixes,
+            'difference': n_our_fixes - n_task_fixes,
+            'potential_missed_by_task': max(0, n_our_on_target - n_task_fixes)
+        })
+
+    comparison_df = pd.DataFrame(comparison_data)
+
+    # Print summary
+    print(f"\n  Comparison Summary:")
+    print(f"    Trials analyzed: {len(comparison_df)}")
+    print(f"    Total our fixations: {comparison_df['our_fixations'].sum()}")
+    print(f"    Total task fixations: {comparison_df['task_fixations'].sum()}")
+    print(f"    Trials where we detected MORE fixations: {(comparison_df['difference'] > 0).sum()}")
+    print(f"    Trials where task detected MORE fixations: {(comparison_df['difference'] < 0).sum()}")
+    print(f"    Trials with perfect match: {(comparison_df['difference'] == 0).sum()}")
+
+    if comparison_df['potential_missed_by_task'].sum() > 0:
+        print(f"    Potential missed detections by task: {comparison_df['potential_missed_by_task'].sum()} on-target fixations")
+
+    # Save comparison
+    if results_dir is not None:
+        results_dir = Path(results_dir)
+        results_dir.mkdir(parents=True, exist_ok=True)
+
+        filename = f"{animal_id}_fixation_comparison.csv" if animal_id else "fixation_comparison.csv"
+        if session_date:
+            filename = f"{animal_id}_{session_date}_fixation_comparison.csv"
+
+        filepath = results_dir / filename
+        comparison_df.to_csv(filepath, index=False)
+        print(f"  Saved comparison to: {filepath}")
+
+    return comparison_df
+
+
+def compare_fixations_frame_by_frame(folder_path: Path, vstim_go_fixation_df: Optional[pd.DataFrame] = None,
+                                      results_dir: Optional[Path] = None,
+                                      animal_id: Optional[str] = None, session_date: str = "",
+                                      min_duration: float = FIXATION_MIN_DURATION) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Compare fixations frame-by-frame between task's fixationlog and our vstim_go_fixation.
+
+    The task's fixationlog.csv has a last column where 0 indicates a fixation was detected
+    at that timepoint. Because fixations require a minimum duration, when the last column
+    is 0, it means that timepoint AND the previous min_duration seconds are all part of
+    the fixation.
+
+    This function:
+    1. Processes fixationlog.csv to identify all frames that are part of detected fixations
+    2. Compares with our vstim_go_fixation detection
+    3. Adds an 'agreement' column to fixationlog (1 = both agree, 0 = differ)
+    4. Only compares frames during trials (not inter-trial intervals)
+
+    Parameters
+    ----------
+    folder_path : Path
+        Path to session folder containing fixationlog.csv
+    vstim_go_fixation_df : pd.DataFrame, optional
+        DataFrame from create_vstim_go_fixation_csv (if already loaded)
+    results_dir : Path, optional
+        Directory to save output CSV
+    animal_id : str, optional
+        Animal identifier for filename
+    session_date : str, optional
+        Session date for filename
+    min_duration : float
+        Minimum fixation duration in seconds (default: 0.5)
+
+    Returns
+    -------
+    Tuple[pd.DataFrame, pd.DataFrame]
+        (fixationlog_with_agreement, comparison_summary)
+        - fixationlog_with_agreement: Original fixationlog with added columns
+        - comparison_summary: Summary statistics of the comparison
+    """
+    import pandas as pd
+
+    print(f"\nComparing fixations frame-by-frame...")
+    print(f"  Using minimum fixation duration: {min_duration}s")
+    folder_path = Path(folder_path)
+
+    # Load fixationlog.csv from task
+    fixlog_file = None
+    for f in folder_path.glob("*fixationlog*.csv"):
+        fixlog_file = f
+        break
+
+    if fixlog_file is None:
+        print("  No fixationlog.csv found in folder - cannot compare")
+        return pd.DataFrame(), pd.DataFrame()
+
+    print(f"  Loading task fixation log: {fixlog_file.name}")
+    try:
+        fixlog_df = pd.read_csv(fixlog_file)
+        print(f"    Loaded {len(fixlog_df)} rows from task fixationlog")
+        print(f"    Columns: {list(fixlog_df.columns)}")
+    except Exception as e:
+        print(f"    Error loading fixationlog: {e}")
+        return pd.DataFrame(), pd.DataFrame()
+
+    # Load vstim_go_fixation if not provided
+    if vstim_go_fixation_df is None:
+        vstim_go_fix_file = None
+        search_dirs = [results_dir, folder_path] if results_dir else [folder_path]
+        for search_dir in search_dirs:
+            if search_dir is None:
+                continue
+            for f in Path(search_dir).glob("*vstim_go_fixation*.csv"):
+                vstim_go_fix_file = f
+                break
+            if vstim_go_fix_file:
+                break
+
+        if vstim_go_fix_file is None:
+            print("  No vstim_go_fixation.csv found - run create_vstim_go_fixation_csv first")
+            return pd.DataFrame(), pd.DataFrame()
+
+        print(f"  Loading offline fixation analysis: {vstim_go_fix_file.name}")
+        vstim_go_fixation_df = pd.read_csv(vstim_go_fix_file)
+
+    print(f"    Loaded {len(vstim_go_fixation_df)} frames from our analysis")
+
+    # Identify the last column in fixationlog (fixation status)
+    last_col = fixlog_df.columns[-1]
+    print(f"  Fixation status column: '{last_col}'")
+
+    # Find which column has frame numbers or timestamps in fixationlog
+    frame_col = None
+    timestamp_col = None
+    for col in fixlog_df.columns:
+        col_lower = col.lower()
+        if 'frame' in col_lower:
+            frame_col = col
+        elif 'time' in col_lower and 'stamp' not in col_lower:
+            timestamp_col = col
+        elif 'timestamp' in col_lower:
+            timestamp_col = col
+
+    # If no frame column, use the first column (often frame number)
+    if frame_col is None and len(fixlog_df.columns) >= 1:
+        first_col = fixlog_df.columns[0]
+        if fixlog_df[first_col].dtype in ['int64', 'float64']:
+            frame_col = first_col
+            print(f"  Using first column '{frame_col}' as frame identifier")
+
+    if timestamp_col is None and len(fixlog_df.columns) >= 2:
+        second_col = fixlog_df.columns[1]
+        if fixlog_df[second_col].dtype == 'float64':
+            timestamp_col = second_col
+            print(f"  Using second column '{timestamp_col}' as timestamp")
+
+    if frame_col is None and timestamp_col is None:
+        print("  Error: Could not identify frame or timestamp column in fixationlog")
+        return pd.DataFrame(), pd.DataFrame()
+
+    # Process fixationlog to identify frames that are part of fixations
+    # When last_col == 0, that frame and previous min_duration seconds are in fixation
+    fixlog_df['task_in_fixation'] = False
+
+    # Debug: show unique values in last column
+    last_col_values = fixlog_df[last_col]
+    print(f"  Last column '{last_col}' dtype: {last_col_values.dtype}")
+    print(f"  Last column unique values: {sorted(last_col_values.unique())[:10]}...")  # Show first 10
+
+    # Find rows where fixation was detected (last column == 0)
+    # Handle different data types robustly
+    if last_col_values.dtype == 'object':  # String type
+        fixation_detected_mask = last_col_values.astype(str).str.strip() == '0'
+    elif np.issubdtype(last_col_values.dtype, np.floating):
+        fixation_detected_mask = np.abs(last_col_values) < 0.001  # Close to 0
+    else:
+        fixation_detected_mask = last_col_values == 0
+
+    fixation_detected_indices = fixlog_df[fixation_detected_mask].index.tolist()
+
+    print(f"  Found {len(fixation_detected_indices)} timepoints where task detected fixation (last_col=0)")
+
+    # For each detection point, mark it and previous min_duration seconds as in fixation
+    if timestamp_col:
+        timestamps = fixlog_df[timestamp_col].values
+        for idx in fixation_detected_indices:
+            detection_time = timestamps[idx]
+            lookback_start = detection_time - min_duration
+
+            # Mark all frames within the lookback window as in fixation
+            mask = (fixlog_df[timestamp_col] >= lookback_start) & (fixlog_df[timestamp_col] <= detection_time)
+            fixlog_df.loc[mask, 'task_in_fixation'] = True
+    elif frame_col:
+        # Estimate frame rate from vstim_go_fixation
+        if 'timestamp' in vstim_go_fixation_df.columns:
+            timestamps_our = vstim_go_fixation_df['timestamp'].values
+            if len(timestamps_our) > 1:
+                frame_rate = 1.0 / np.median(np.diff(timestamps_our))
+                frames_in_min_duration = int(min_duration * frame_rate)
+                print(f"  Estimated frame rate: {frame_rate:.1f} Hz, lookback frames: {frames_in_min_duration}")
+            else:
+                frames_in_min_duration = int(min_duration * 60)  # Assume 60 Hz
+        else:
+            frames_in_min_duration = int(min_duration * 60)  # Assume 60 Hz
+
+        frames = fixlog_df[frame_col].values
+        for idx in fixation_detected_indices:
+            detection_frame = frames[idx]
+            lookback_start = detection_frame - frames_in_min_duration
+
+            # Mark all frames within the lookback window as in fixation
+            mask = (fixlog_df[frame_col] >= lookback_start) & (fixlog_df[frame_col] <= detection_frame)
+            fixlog_df.loc[mask, 'task_in_fixation'] = True
+
+    task_in_fix_count = fixlog_df['task_in_fixation'].sum()
+    print(f"  After lookback processing: {task_in_fix_count} frames marked as in fixation by task")
+
+    # Merge fixationlog with vstim_go_fixation by frame number
+    merge_col = frame_col if frame_col else None
+    if merge_col and merge_col in fixlog_df.columns and 'frame' in vstim_go_fixation_df.columns:
+        # Merge on frame number
+        merged_df = pd.merge(
+            fixlog_df,
+            vstim_go_fixation_df[['frame', 'in_fixation', 'trial_number', 'within_contact_threshold']],
+            left_on=merge_col,
+            right_on='frame',
+            how='left',
+            suffixes=('', '_our')
+        )
+        print(f"  Merged {len(merged_df)} frames by frame number")
+    else:
+        # Try to merge by timestamp if available
+        print("  Warning: Could not merge by frame number, attempting timestamp-based comparison")
+        merged_df = fixlog_df.copy()
+        merged_df['in_fixation'] = np.nan
+        merged_df['trial_number'] = 0
+        merged_df['within_contact_threshold'] = np.nan
+
+    # Only compare during trials (trial_number > 0)
+    if 'trial_number' in merged_df.columns:
+        trial_mask = merged_df['trial_number'] > 0
+        print(f"  Frames during trials: {trial_mask.sum()} (excluding inter-trial intervals)")
+    else:
+        trial_mask = pd.Series([True] * len(merged_df))
+        print("  Warning: No trial_number column, comparing all frames")
+
+    # Calculate agreement column
+    # 1 if both agree (both True or both False), 0 if they differ
+    merged_df['our_in_fixation'] = merged_df['in_fixation'].fillna(False).astype(bool)
+    merged_df['agreement'] = np.where(
+        trial_mask,
+        (merged_df['task_in_fixation'] == merged_df['our_in_fixation']).astype(int),
+        -1  # Mark inter-trial frames as -1
+    )
+
+    # Calculate detailed comparison statistics (only during trials)
+    trial_df = merged_df[trial_mask].copy()
+
+    # True positives: both detect fixation
+    tp = ((trial_df['task_in_fixation'] == True) & (trial_df['our_in_fixation'] == True)).sum()
+    # True negatives: both detect no fixation
+    tn = ((trial_df['task_in_fixation'] == False) & (trial_df['our_in_fixation'] == False)).sum()
+    # False positives: we detect fixation, task doesn't
+    fp = ((trial_df['task_in_fixation'] == False) & (trial_df['our_in_fixation'] == True)).sum()
+    # False negatives: task detects fixation, we don't
+    fn = ((trial_df['task_in_fixation'] == True) & (trial_df['our_in_fixation'] == False)).sum()
+
+    total_trial_frames = len(trial_df)
+    agreement_rate = (tp + tn) / total_trial_frames * 100 if total_trial_frames > 0 else 0
+
+    print(f"\n  Comparison Results (during trials only):")
+    print(f"    Total trial frames: {total_trial_frames}")
+    print(f"    Agreement rate: {agreement_rate:.1f}%")
+    print(f"    Both detect fixation (TP): {tp} frames ({tp/total_trial_frames*100:.1f}%)")
+    print(f"    Both detect no fixation (TN): {tn} frames ({tn/total_trial_frames*100:.1f}%)")
+    print(f"    We detect, task doesn't (FP): {fp} frames ({fp/total_trial_frames*100:.1f}%)")
+    print(f"    Task detects, we don't (FN): {fn} frames ({fn/total_trial_frames*100:.1f}%)")
+
+    # Create summary dataframe
+    summary_data = {
+        'metric': ['total_trial_frames', 'agreement_rate', 'true_positives', 'true_negatives',
+                   'false_positives', 'false_negatives', 'task_fixation_frames', 'our_fixation_frames'],
+        'value': [total_trial_frames, agreement_rate, tp, tn, fp, fn,
+                  trial_df['task_in_fixation'].sum(), trial_df['our_in_fixation'].sum()]
+    }
+    summary_df = pd.DataFrame(summary_data)
+
+    # Prepare output dataframe (fixationlog with added columns)
+    output_cols = list(fixlog_df.columns) + ['task_in_fixation', 'our_in_fixation', 'agreement']
+    if 'trial_number' in merged_df.columns:
+        output_cols.append('trial_number')
+
+    output_df = merged_df[[c for c in output_cols if c in merged_df.columns]].copy()
+
+    # Save outputs if results_dir provided
+    if results_dir is not None:
+        results_dir = Path(results_dir)
+        results_dir.mkdir(parents=True, exist_ok=True)
+
+        prefix = f"{animal_id}_{session_date}" if animal_id and session_date else (animal_id or "")
+        prefix = prefix + "_" if prefix else ""
+
+        # Save fixationlog with agreement
+        fixlog_output_path = results_dir / f"{prefix}fixationlog_with_agreement.csv"
+        output_df.to_csv(fixlog_output_path, index=False)
+        print(f"\n  Saved fixationlog with agreement to: {fixlog_output_path}")
+
+        # Save summary
+        summary_output_path = results_dir / f"{prefix}fixation_comparison_summary.csv"
+        summary_df.to_csv(summary_output_path, index=False)
+        print(f"  Saved comparison summary to: {summary_output_path}")
+
+    return output_df, summary_df
 
 
 # NEW: Fixation targeting analysis function
@@ -3601,7 +4541,8 @@ def plot_fixation_targeting_analysis(trials: list[dict], results_dir: Optional[P
         eye_t = trial['eye_times']
         target_x = trial.get('target_x', 0.0)
         target_y = trial.get('target_y', 0.0)
-        target_radius = trial.get('target_radius', 0.15)
+        target_radius = trial.get('target_diameter', 0.3) / 2.0 if 'target_diameter' in trial else trial.get('target_radius', 0.15)
+        cursor_radius = trial.get('cursor_diameter', 0.2) / 2.0
         target_visible = trial.get('target_visible', 1)
 
         # Determine if target is left or right
@@ -3652,7 +4593,9 @@ def plot_fixation_targeting_analysis(trials: list[dict], results_dir: Optional[P
 
                 # Calculate distance to target
                 dist_to_target = np.sqrt((center_x - target_x)**2 + (center_y - target_y)**2)
-                within_target = dist_to_target <= target_radius
+                # Check if fixation is "on target" accounting for both target and cursor sizes
+                contact_threshold = target_radius + cursor_radius
+                within_target = dist_to_target <= contact_threshold
 
                 fixation_info = (center_x, center_y, span, dist_to_target, within_target)
 
@@ -5119,6 +6062,24 @@ def analyze_folder(folder_path: str | Path, results_dir: Optional[str | Path] = 
         plt.show()
     plt.close(fig_fixation_targeting)
 
+    # NEW: Save detailed fixation data
+    print("\nSaving detailed fixation data...")
+    detailed_fixation_df = save_detailed_fixation_data(trials_for_analysis, results_dir=results_dir,
+                                                        animal_id=animal_id,
+                                                        session_date=date_str)
+
+    # NEW: Create vstim_go_fixation CSV for debugging
+    print("\nCreating vstim_go_fixation CSV for debugging...")
+    vstim_go_fixation_df = create_vstim_go_fixation_csv(folder_path, results_dir=results_dir,
+                                                         animal_id=animal_id,
+                                                         session_date=date_str)
+
+    # NEW: Compare with task's real-time fixation detection
+    comparison_df = compare_fixation_detection(folder_path, vstim_go_fixation_df=vstim_go_fixation_df,
+                                                results_dir=results_dir,
+                                                animal_id=animal_id,
+                                                session_date=date_str)
+
     print("\nPlotting final positions by target type...")
     fig_final_pos = plot_final_positions_by_target(trials_for_analysis, min_duration=trial_min_duration, max_duration=trial_max_duration,
                                                     results_dir=results_dir,
@@ -5292,41 +6253,41 @@ def main(session_id: str, trial_min_duration: float = 0.01, trial_max_duration: 
     plt.show()
     plt.close(fig_heat)
 
-    print("\nGenerating time-to-target plot...")
-    fig_time = plot_time_to_target(trials_for_analysis, results_dir, animal_id, date_str)
-    plt.show()
-    plt.close(fig_time)
+    # print("\nGenerating time-to-target plot...")
+    # fig_time = plot_time_to_target(trials_for_analysis, results_dir, animal_id, date_str)
+    # plt.show()
+    # plt.close(fig_time)
 
-    print("\nGenerating path length plot...")
-    fig_path = plot_path_length(trials_for_analysis, results_dir, animal_id, date_str)
-    plt.show()
-    plt.close(fig_path)
+    # print("\nGenerating path length plot...")
+    # fig_path = plot_path_length(trials_for_analysis, results_dir, animal_id, date_str)
+    # plt.show()
+    # plt.close(fig_path)
 
-    print("\nRunning left vs right target comparison...")
-    fig_lr, lr_stats = compare_left_right_performance(trials_for_analysis, left_x=-0.7, right_x=0.7,
-                                                       results_dir=results_dir,
-                                                       animal_id=animal_id,
-                                                       session_date=date_str)
-    if fig_lr is not None:
-        plt.show()
-        plt.close(fig_lr)
+    # print("\nRunning left vs right target comparison...")
+    # fig_lr, lr_stats = compare_left_right_performance(trials_for_analysis, left_x=-0.7, right_x=0.7,
+    #                                                    results_dir=results_dir,
+    #                                                    animal_id=animal_id,
+    #                                                    session_date=date_str)
+    # if fig_lr is not None:
+    #     plt.show()
+    #     plt.close(fig_lr)
 
-    print("\nRunning visible vs invisible target comparison...")
-    fig_vis, vis_stats = compare_visible_invisible_performance(trials_for_analysis, results_dir=results_dir,
-                                                                animal_id=animal_id,
-                                                                session_date=date_str)
-    if fig_vis is not None:
-        plt.show()
-        plt.close(fig_vis)
+    # print("\nRunning visible vs invisible target comparison...")
+    # fig_vis, vis_stats = compare_visible_invisible_performance(trials_for_analysis, results_dir=results_dir,
+    #                                                             animal_id=animal_id,
+    #                                                             session_date=date_str)
+    # if fig_vis is not None:
+    #     plt.show()
+    #     plt.close(fig_vis)
 
-    # NEW: Detailed visible/invisible statistics (including success/failure and direction errors)
-    print("\nGenerating detailed visible vs invisible target statistics...")
-    fig_vis_detailed, vis_detailed_stats = plot_visible_invisible_detailed_stats(trials_all, results_dir=results_dir,
-                                                                                  animal_id=animal_id,
-                                                                                  session_date=date_str)
-    if fig_vis_detailed is not None:
-        plt.show()
-        plt.close(fig_vis_detailed)
+    # # NEW: Detailed visible/invisible statistics (including success/failure and direction errors)
+    # print("\nGenerating detailed visible vs invisible target statistics...")
+    # fig_vis_detailed, vis_detailed_stats = plot_visible_invisible_detailed_stats(trials_all, results_dir=results_dir,
+    #                                                                               animal_id=animal_id,
+    #                                                                               session_date=date_str)
+    # if fig_vis_detailed is not None:
+    #     plt.show()
+    #     plt.close(fig_vis_detailed)
 
     # # NEW: Heatmaps broken down by position and visibility
     # print("\nGenerating heatmaps by position and visibility...")
