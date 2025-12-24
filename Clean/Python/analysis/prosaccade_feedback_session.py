@@ -603,231 +603,6 @@ def extract_trial_trajectories(eot_df: pd.DataFrame, eye_df: pd.DataFrame,
     return trials
 
 
-def plot_trajectories(trials: list[dict], results_dir: Optional[Path] = None,
-                      animal_id: Optional[str] = None, session_date: str = "") -> plt.Figure:
-    """Plot eye position trajectories and target positions in absolute coordinates.
-
-    Parameters
-    ----------
-    trials : list of dict
-        List of trial data dictionaries
-    results_dir : Path, optional
-        Directory to save the figure
-    animal_id : str, optional
-        Animal identifier for filename
-    session_date : str, optional
-        Session date for title
-
-    Returns
-    -------
-    matplotlib.figure.Figure
-        The generated figure
-    """
-    fig, ax = plt.subplots(figsize=(12, 10))
-
-    # Color map for trials - purple to green (early to late)
-    from matplotlib.colors import LinearSegmentedColormap
-    colors_list = ['#9b59b6', '#3498db', '#2ecc71']  # purple -> blue -> green
-    cmap = LinearSegmentedColormap.from_list('purple_green', colors_list)
-    n_trials = len(trials)
-
-    # Plot each trial
-    for i, trial in enumerate(trials):
-        # Use absolute eye positions
-        eye_x = trial['eye_x']
-        eye_y = trial['eye_y']
-
-        # Plot trajectory as lines
-        color = cmap(i / max(1, n_trials - 1))
-        ax.plot(eye_x, eye_y, '-', color=color, alpha=0.6, linewidth=1.5)
-
-        # Mark start and end points with different markers
-        ax.plot(eye_x[0], eye_y[0], 'o', color=color, markersize=8, alpha=0.9,
-                markeredgecolor='white', markeredgewidth=1)
-        # Use calculated final position (from vstim_go next row after trial)
-        final_x = trial.get('final_eye_x', eye_x[-1])
-        final_y = trial.get('final_eye_y', eye_y[-1])
-        ax.plot(final_x, final_y, 's', color=color, markersize=8, alpha=0.9,
-                markeredgecolor='white', markeredgewidth=1)
-
-        # Draw target position as black circle at actual position with actual diameter
-        target_x = trial['target_x']
-        target_y = trial['target_y']
-        target_radius = trial['target_diameter'] / 2.0
-        target_visible = trial.get('target_visible', 1)  # Default to visible if not present
-
-        # Use dashed line for invisible targets
-        linestyle = '-' if target_visible else '--'
-        alpha_val = 1.0 if target_visible else 0.4
-
-        target_circle = Circle((target_x, target_y), radius=target_radius, fill=False,
-                              edgecolor='black', linewidth=2.5, linestyle=linestyle,
-                              alpha=alpha_val, label='Target' if i == 0 else None)
-        ax.add_patch(target_circle)
-
-        # Add smaller filled circle at target center (hollow for invisible targets)
-        if target_visible:
-            ax.plot(target_x, target_y, 'ko', markersize=4,
-                   label='Target Center' if i == 0 else None)
-        else:
-            ax.plot(target_x, target_y, 'ko', markersize=4, markerfacecolor='none',
-                   markeredgewidth=1, alpha=0.5,
-                   label='Target Center (invisible)' if i == 0 else None)
-
-    ax.set_xlabel('Horizontal Position (stimulus units)', fontsize=12)
-    ax.set_ylabel('Vertical Position (stimulus units)', fontsize=12)
-
-    title = 'Eye Position Trajectories to Target'
-    if animal_id:
-        title += f' - {animal_id}'
-    if session_date:
-        title += f' ({session_date})'
-    ax.set_title(title, fontsize=14, fontweight='bold')
-
-    ax.grid(True, alpha=0.3)
-
-    # Set axis limits to -1.7 to 1.7 on x-axis, -1 to 1 on y-axis
-    ax.set_xlim(-1.7, 1.7)
-    ax.set_ylim(-1, 1)
-    # Use set_aspect instead of axis('equal') to preserve the limits
-    ax.set_aspect('equal', adjustable='box')
-
-    # Add colorbar for trial number
-    sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(vmin=1, vmax=n_trials))
-    sm.set_array([])
-    cbar = plt.colorbar(sm, ax=ax, label='Trial Number')
-
-    plt.tight_layout()
-
-    # Save figure if results directory provided
-    if results_dir:
-        results_dir.mkdir(parents=True, exist_ok=True)
-        prefix = f"{animal_id}_" if animal_id else ""
-        filename = f"{prefix}saccade_feedback_trajectories.png"
-        fig.savefig(results_dir / filename, dpi=150, bbox_inches='tight')
-        print(f"Saved trajectory plot to {results_dir / filename}")
-
-    return fig
-
-
-def plot_trajectories_by_direction(trials: list[dict], results_dir: Optional[Path] = None,
-                                   animal_id: Optional[str] = None, session_date: str = "") -> plt.Figure:
-    """Plot eye position trajectories with different colors for left vs right targets.
-
-    Parameters
-    ----------
-    trials : list of dict
-        List of trial data dictionaries
-    results_dir : Path, optional
-        Directory to save the figure
-    animal_id : str, optional
-        Animal identifier for filename
-    session_date : str, optional
-        Session date for title
-
-    Returns
-    -------
-    matplotlib.figure.Figure
-        The generated figure
-    """
-    from matplotlib.patches import Circle
-
-    fig, ax = plt.subplots(figsize=(12, 10))
-
-    # Separate trials by target direction
-    left_trials = [t for t in trials if t['target_x'] < 0]
-    right_trials = [t for t in trials if t['target_x'] >= 0]
-
-    # Colors for left and right
-    left_color = 'blue'
-    right_color = 'red'
-
-    # Plot left trials
-    for trial in left_trials:
-        eye_x = trial['eye_x']
-        eye_y = trial['eye_y']
-
-        ax.plot(eye_x, eye_y, '-', color=left_color, alpha=0.5, linewidth=1.5)
-
-        # Mark start and end points (use calculated final position)
-        ax.plot(eye_x[0], eye_y[0], 'o', color=left_color, markersize=6, alpha=0.7,
-                markeredgecolor='white', markeredgewidth=1)
-        final_x = trial.get('final_eye_x', eye_x[-1])
-        final_y = trial.get('final_eye_y', eye_y[-1])
-        ax.plot(final_x, final_y, 's', color=left_color, markersize=6, alpha=0.7,
-                markeredgecolor='white', markeredgewidth=1)
-
-    # Plot right trials
-    for trial in right_trials:
-        eye_x = trial['eye_x']
-        eye_y = trial['eye_y']
-
-        ax.plot(eye_x, eye_y, '-', color=right_color, alpha=0.5, linewidth=1.5)
-
-        # Mark start and end points (use calculated final position)
-        ax.plot(eye_x[0], eye_y[0], 'o', color=right_color, markersize=6, alpha=0.7,
-                markeredgecolor='white', markeredgewidth=1)
-        final_x = trial.get('final_eye_x', eye_x[-1])
-        final_y = trial.get('final_eye_y', eye_y[-1])
-        ax.plot(final_x, final_y, 's', color=right_color, markersize=6, alpha=0.7,
-                markeredgecolor='white', markeredgewidth=1)
-
-    # Draw targets
-    targets_drawn = set()
-    for trial in trials:
-        target_x = trial['target_x']
-        target_y = trial['target_y']
-        target_radius = trial['target_diameter'] / 2.0
-        target_visible = trial.get('target_visible', 1)  # Default to visible
-        key = (round(target_x, 2), round(target_y, 2))
-
-        if key not in targets_drawn:
-            # Use dashed line for invisible targets
-            linestyle = '-' if target_visible else '--'
-            alpha_val = 1.0 if target_visible else 0.4
-
-            target_circle = Circle((target_x, target_y), radius=target_radius,
-                                  fill=False, edgecolor='black', linewidth=2.5,
-                                  linestyle=linestyle, alpha=alpha_val)
-            ax.add_patch(target_circle)
-
-            # Use hollow marker for invisible targets
-            if target_visible:
-                ax.plot(target_x, target_y, 'ko', markersize=4)
-            else:
-                ax.plot(target_x, target_y, 'ko', markersize=4, markerfacecolor='none',
-                       markeredgewidth=1, alpha=0.5)
-            targets_drawn.add(key)
-
-    ax.set_xlabel('Horizontal Position (stimulus units)', fontsize=12)
-    ax.set_ylabel('Vertical Position (stimulus units)', fontsize=12)
-
-    title = 'Eye Position Trajectories by Target Direction'
-    if animal_id:
-        title += f' - {animal_id}'
-    if session_date:
-        title += f' ({session_date})'
-    ax.set_title(title, fontsize=14, fontweight='bold')
-
-    ax.grid(True, alpha=0.3)
-    ax.set_xlim(-1.7, 1.7)
-    ax.set_ylim(-1, 1)
-    ax.set_aspect('equal', adjustable='box')
-
-
-    plt.tight_layout()
-
-    # Save figure if results directory provided
-    if results_dir:
-        results_dir.mkdir(parents=True, exist_ok=True)
-        prefix = f"{animal_id}_" if animal_id else ""
-        filename = f"{prefix}saccade_feedback_trajectories_by_direction.png"
-        fig.savefig(results_dir / filename, dpi=150, bbox_inches='tight')
-        print(f"Saved trajectory by direction plot to {results_dir / filename}")
-
-    return fig
-
-
 def interactive_trajectories(trials: list[dict], animal_id: Optional[str] = None,
                             session_date: str = ""):
     """Interactive plot showing trajectories one trial at a time. Press spacebar to advance.
@@ -998,215 +773,6 @@ def interactive_trajectories(trials: list[dict], animal_id: Optional[str] = None
     plot_trial(0)
 
     plt.show()
-
-
-def animate_trajectories(trials: list[dict], results_dir: Optional[Path] = None,
-                        animal_id: Optional[str] = None, session_date: str = "",
-                        fps: int = 30, points_per_frame: int = 2) -> str:
-    """Create an animation showing trajectories building over time, one trial at a time.
-
-    Parameters
-    ----------
-    trials : list of dict
-        List of trial data dictionaries
-    results_dir : Path, optional
-        Directory to save the animation
-    animal_id : str, optional
-        Animal identifier for filename
-    session_date : str, optional
-        Session date for title
-    fps : int
-        Frames per second for animation (default: 30)
-    points_per_frame : int
-        Number of points to add per frame when building trajectory (default: 2)
-
-    Returns
-    -------
-    str
-        Path to saved animation file
-    """
-    import matplotlib.animation as animation
-    from matplotlib.patches import Circle
-
-    fig, ax = plt.subplots(figsize=(12, 10))
-
-    # Color map for trials
-    cmap = plt.cm.coolwarm
-    n_trials = len(trials)
-
-    # Set up the plot
-    ax.set_xlim(-1.7, 1.7)
-    ax.set_ylim(-1, 1)
-    ax.set_aspect('equal', adjustable='box')
-    ax.grid(True, alpha=0.3)
-    ax.set_xlabel('Horizontal Position (stimulus units)', fontsize=12)
-    ax.set_ylabel('Vertical Position (stimulus units)', fontsize=12)
-
-    title = 'Eye Position Trajectories - Animated'
-    if animal_id:
-        title += f' - {animal_id}'
-    if session_date:
-        title += f' ({session_date})'
-    ax.set_title(title, fontsize=14, fontweight='bold')
-
-    # Pre-draw all unique target positions (they don't animate)
-    # Draw as neutral gray since same position may have different visibility across trials
-    drawn_targets = set()
-    for trial in trials:
-        target_x = trial['target_x']
-        target_y = trial['target_y']
-        target_radius = trial['target_diameter'] / 2.0
-        key = (round(target_x, 2), round(target_y, 2))
-
-        if key not in drawn_targets:
-            # Draw all targets as gray circles (neutral - no visibility indication)
-            target_circle = Circle((target_x, target_y), radius=target_radius,
-                                  fill=False, edgecolor='gray', linewidth=2,
-                                  linestyle='-', alpha=0.4)
-            ax.add_patch(target_circle)
-            ax.plot(target_x, target_y, 'o', color='gray', markersize=3, alpha=0.4)
-            drawn_targets.add(key)
-
-    # Storage for completed trials (will persist across frames)
-    completed_lines = []
-    completed_markers = []
-
-    # Current trial line and points (updated each frame)
-    current_line, = ax.plot([], [], '-', linewidth=1.5, alpha=0.8)
-    current_start, = ax.plot([], [], 'o', markersize=8, markeredgecolor='white',
-                             markeredgewidth=1, alpha=0.9)
-    current_end, = ax.plot([], [], 's', markersize=8, markeredgecolor='white',
-                           markeredgewidth=1, alpha=0.9)
-
-    # Text showing progress
-    progress_text = ax.text(0.02, 0.98, '', transform=ax.transAxes,
-                           fontsize=11, verticalalignment='top',
-                           bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
-
-    # Calculate total number of frames needed
-    total_points = sum(len(trial['eye_x']) for trial in trials)
-    total_frames = int(np.ceil(total_points / points_per_frame))
-
-    # Keep track of where we are
-    current_trial_idx = 0
-    current_point_idx = 0
-
-    def init():
-        """Initialize animation"""
-        current_line.set_data([], [])
-        current_start.set_data([], [])
-        current_end.set_data([], [])
-        progress_text.set_text('')
-        return [current_line, current_start, current_end, progress_text]
-
-    def animate(frame):
-        """Animation function called for each frame"""
-        nonlocal current_trial_idx, current_point_idx, completed_lines, completed_markers
-
-        # Check if we've finished all trials
-        if current_trial_idx >= n_trials:
-            return [current_line, current_start, current_end, progress_text]
-
-        trial = trials[current_trial_idx]
-        eye_x = trial['eye_x']
-        eye_y = trial['eye_y']
-        color = cmap(current_trial_idx / max(1, n_trials - 1))
-
-        # Add points to current trajectory
-        end_idx = min(current_point_idx + points_per_frame, len(eye_x))
-
-        # Update current line
-        current_line.set_data(eye_x[:end_idx], eye_y[:end_idx])
-        current_line.set_color(color)
-
-        # Update start marker
-        current_start.set_data([eye_x[0]], [eye_y[0]])
-        current_start.set_color(color)
-
-        # Update end marker if we're at the end of this trial (use calculated final position)
-        trial = trials[current_trial_idx]
-        final_x = trial.get('final_eye_x', eye_x[-1] if len(eye_x) > 0 else 0)
-        final_y = trial.get('final_eye_y', eye_y[-1] if len(eye_y) > 0 else 0)
-        if end_idx == len(eye_x):
-            current_end.set_data([final_x], [final_y])
-            current_end.set_color(color)
-        else:
-            current_end.set_data([], [])
-
-        # Update progress text
-        progress_text.set_text(f'Trial {current_trial_idx + 1}/{n_trials}\n' +
-                              f'Point {end_idx}/{len(eye_x)}')
-
-        # Check if current trial is complete
-        if end_idx >= len(eye_x):
-            # Save this trial as a completed line
-            completed_line, = ax.plot(eye_x, eye_y, '-', color=color,
-                                     linewidth=1.5, alpha=0.6)
-            completed_start, = ax.plot(eye_x[0], eye_y[0], 'o', color=color,
-                                      markersize=8, markeredgecolor='white',
-                                      markeredgewidth=1, alpha=0.9)
-            completed_end, = ax.plot(final_x, final_y, 's', color=color,
-                                    markersize=8, markeredgecolor='white',
-                                    markeredgewidth=1, alpha=0.9)
-
-            completed_lines.extend([completed_line, completed_start, completed_end])
-
-            # Move to next trial
-            current_trial_idx += 1
-            current_point_idx = 0
-
-            # Clear current line for next trial
-            current_line.set_data([], [])
-            current_start.set_data([], [])
-            current_end.set_data([], [])
-        else:
-            current_point_idx = end_idx
-
-        return [current_line, current_start, current_end, progress_text] + completed_lines
-
-    # Create animation
-    print(f"\nCreating animation ({total_frames} frames at {fps} fps)...")
-    anim = animation.FuncAnimation(fig, animate, init_func=init,
-                                  frames=total_frames, interval=1000/fps,
-                                  blit=True, repeat=False)
-
-    # Save animation
-    if results_dir:
-        results_dir.mkdir(parents=True, exist_ok=True)
-        prefix = f"{animal_id}_" if animal_id else ""
-        filename = f"{prefix}saccade_feedback_trajectories_animated.mp4"
-        filepath = results_dir / filename
-
-        print(f"Saving animation to {filepath}")
-        print("(This may take a minute...)")
-
-        # Try to save as mp4 (requires ffmpeg)
-        try:
-            writer = animation.FFMpegWriter(fps=fps, bitrate=1800)
-            anim.save(str(filepath), writer=writer, dpi=100)
-            print(f"Saved animation to {filepath}")
-            plt.close(fig)
-            return str(filepath)
-        except Exception as e:
-            print(f"Could not save as mp4 (ffmpeg may not be installed): {e}")
-            print("Trying to save as gif instead...")
-
-            # Fall back to gif
-            filename_gif = f"{prefix}saccade_feedback_trajectories_animated.gif"
-            filepath_gif = results_dir / filename_gif
-            try:
-                anim.save(str(filepath_gif), writer='pillow', fps=fps, dpi=80)
-                print(f"Saved animation as gif to {filepath_gif}")
-                plt.close(fig)
-                return str(filepath_gif)
-            except Exception as e2:
-                print(f"Could not save animation: {e2}")
-                print("Please install ffmpeg or pillow to save animations")
-                plt.close(fig)
-                return None
-    else:
-        plt.close(fig)
-        return None
 
 
 def plot_density_heatmap(trials: list[dict], results_dir: Optional[Path] = None,
@@ -2956,236 +2522,6 @@ def plot_heatmaps_by_position_and_visibility(trials: list[dict], results_dir: Op
     return fig
 
 
-def test_voluntary_targeted_movement(trials: list[dict], results_dir: Optional[Path] = None,
-                                      animal_id: Optional[str] = None, session_date: str = "") -> tuple:
-    """Test whether animals make voluntary targeted movements vs random eye movements.
-
-    Compares initial direction errors to a random/uniform model. Voluntary movements should
-    show initial directions clustered near target (low direction error), while random movements
-    would show uniform distribution with mean ~90°.
-
-    This function is standalone and can be easily removed without affecting other analyses.
-
-    Parameters
-    ----------
-    trials : list of dict
-        List of trial data dictionaries (successful trials with valid direction errors)
-    results_dir : Path, optional
-        Directory to save the figure
-    animal_id : str, optional
-        Animal identifier for filename
-    session_date : str, optional
-        Session date for title
-
-    Returns
-    -------
-    tuple of (fig, stats_dict)
-        Figure and dictionary containing statistics
-    """
-    from scipy import stats as scipy_stats
-
-    # Extract initial direction errors from trials with valid data
-    direction_errors = [t['initial_direction_error'] for t in trials
-                       if not np.isnan(t.get('initial_direction_error', np.nan))]
-
-    n_trials = len(direction_errors)
-
-    print(f"\nVoluntary Targeted Movement Analysis:")
-    print(f"  Trials with valid initial direction error: {n_trials}")
-
-    if n_trials < 3:
-        print("Warning: Not enough trials for voluntary movement analysis")
-        return None, None
-
-    direction_errors = np.array(direction_errors)
-
-    # Calculate observed statistics
-    mean_error = np.mean(direction_errors)
-    median_error = np.median(direction_errors)
-    std_error = np.std(direction_errors)
-
-    # Random model: uniform distribution from 0 to 180 degrees
-    # Mean of uniform(0, 180) = 90 degrees
-    random_mean = 90.0
-
-    # Statistical tests
-    # 1. One-sample t-test: Is observed mean significantly < 90°?
-    t_stat, t_pvalue = scipy_stats.ttest_1samp(direction_errors, random_mean, alternative='less')
-
-    # 2. Kolmogorov-Smirnov test: Is distribution different from uniform?
-    # Under uniform distribution, errors should be uniformly distributed 0-180
-    ks_stat, ks_pvalue = scipy_stats.kstest(direction_errors,
-                                            lambda x: scipy_stats.uniform(0, 180).cdf(x))
-
-    # Create figure with 2x2 subplots
-    fig, axes = plt.subplots(2, 2, figsize=(14, 11))
-    fig.suptitle(f'Voluntary Targeted Movement Analysis - {animal_id} - {session_date}',
-                fontsize=14, fontweight='bold')
-
-    # Plot 1: Histogram of observed initial direction errors
-    ax = axes[0, 0]
-    counts, bins, patches = ax.hist(direction_errors, bins=20, range=(0, 180),
-                                     color='steelblue', alpha=0.7, edgecolor='black',
-                                     density=True, label='Observed')
-
-    # Overlay uniform distribution expectation
-    uniform_height = 1.0 / 180.0  # density for uniform(0, 180)
-    ax.axhline(uniform_height, color='red', linestyle='--', linewidth=2,
-              label=f'Random model (uniform)', alpha=0.8)
-
-    ax.axvline(mean_error, color='blue', linestyle='-', linewidth=2,
-              label=f'Observed mean = {mean_error:.1f}°')
-    ax.axvline(random_mean, color='red', linestyle=':', linewidth=2,
-              label=f'Random mean = {random_mean:.1f}°')
-
-    ax.set_xlabel('Initial Direction Error (degrees)', fontsize=11)
-    ax.set_ylabel('Probability Density', fontsize=11)
-    ax.set_title('Distribution of Initial Direction Errors', fontsize=12, fontweight='bold')
-    ax.legend(fontsize=9)
-    ax.grid(True, alpha=0.3, axis='y')
-    ax.set_xlim(0, 180)
-
-    # Plot 2: Cumulative distribution comparison
-    ax = axes[0, 1]
-    sorted_errors = np.sort(direction_errors)
-    cumulative = np.arange(1, n_trials + 1) / n_trials
-    ax.plot(sorted_errors, cumulative, 'b-', linewidth=2, label='Observed')
-
-    # Theoretical uniform CDF
-    uniform_x = np.linspace(0, 180, 100)
-    uniform_cdf = uniform_x / 180.0
-    ax.plot(uniform_x, uniform_cdf, 'r--', linewidth=2, label='Random (uniform)')
-
-    ax.set_xlabel('Initial Direction Error (degrees)', fontsize=11)
-    ax.set_ylabel('Cumulative Probability', fontsize=11)
-    ax.set_title(f'Cumulative Distribution\nKS test: p = {ks_pvalue:.4e}',
-                fontsize=12, fontweight='bold')
-    ax.legend(fontsize=10)
-    ax.grid(True, alpha=0.3)
-    ax.set_xlim(0, 180)
-    ax.set_ylim(0, 1)
-
-    # Plot 3: Box plot comparison
-    ax = axes[1, 0]
-
-    # Create random samples for visualization
-    np.random.seed(42)
-    random_samples = np.random.uniform(0, 180, size=n_trials)
-
-    bp = ax.boxplot([direction_errors, random_samples],
-                     labels=['Observed\n(Targeted)', 'Random Model\n(Uniform)'],
-                     widths=0.6, patch_artist=True)
-
-    bp['boxes'][0].set_facecolor('steelblue')
-    bp['boxes'][1].set_facecolor('lightcoral')
-
-    # Add means as points
-    ax.plot(1, mean_error, 'ro', markersize=10, label='Mean')
-    ax.plot(2, random_mean, 'ro', markersize=10)
-
-    # Add horizontal line at 45° (halfway to random)
-    ax.axhline(45, color='orange', linestyle=':', linewidth=1.5, alpha=0.7,
-              label='45° (halfway to random)')
-
-    ax.set_ylabel('Initial Direction Error (degrees)', fontsize=11)
-    ax.set_title(f'Observed vs Random Model\nt-test: p = {t_pvalue:.4e}',
-                fontsize=12, fontweight='bold')
-    ax.legend(fontsize=9)
-    ax.grid(True, alpha=0.3, axis='y')
-    ax.set_ylim(0, 180)
-
-    # Plot 4: Summary statistics table
-    ax = axes[1, 1]
-    ax.axis('off')
-
-    # Determine significance
-    is_voluntary = t_pvalue < 0.05 and mean_error < 45
-
-    table_data = [
-        ['Metric', 'Value'],
-        ['', ''],
-        ['Sample Size', f'{n_trials} trials'],
-        ['', ''],
-        ['Observed Mean', f'{mean_error:.1f}°'],
-        ['Observed Median', f'{median_error:.1f}°'],
-        ['Observed Std Dev', f'{std_error:.1f}°'],
-        ['', ''],
-        ['Random Model Mean', f'{random_mean:.1f}°'],
-        ['', ''],
-        ['t-test (mean < 90°)', f'p = {t_pvalue:.4e}'],
-        ['KS test (vs uniform)', f'p = {ks_pvalue:.4e}'],
-        ['', ''],
-        ['Interpretation', ''],
-        ['Mean < 45°?', 'YES' if mean_error < 45 else 'NO'],
-        ['Significant (p<0.05)?', 'YES' if t_pvalue < 0.05 else 'NO'],
-        ['', ''],
-        ['Conclusion', 'VOLUNTARY' if is_voluntary else 'UNCLEAR'],
-    ]
-
-    table = ax.table(cellText=table_data, cellLoc='left', loc='center',
-                    colWidths=[0.5, 0.5])
-    table.auto_set_font_size(False)
-    table.set_fontsize(10)
-    table.scale(1, 1.8)
-
-    # Style header and conclusion rows
-    table[(0, 0)].set_facecolor('#2196F3')
-    table[(0, 0)].set_text_props(weight='bold', color='white')
-    table[(0, 1)].set_facecolor('#2196F3')
-    table[(0, 1)].set_text_props(weight='bold', color='white')
-
-    # Color conclusion row
-    conclusion_row = 17
-    if is_voluntary:
-        table[(conclusion_row, 1)].set_facecolor('#4CAF50')
-        table[(conclusion_row, 1)].set_text_props(weight='bold', color='white', size=12)
-    else:
-        table[(conclusion_row, 1)].set_facecolor('#FFC107')
-        table[(conclusion_row, 1)].set_text_props(weight='bold', size=12)
-
-    plt.tight_layout()
-
-    # Save figure
-    if results_dir:
-        results_dir.mkdir(parents=True, exist_ok=True)
-        filename = f"{animal_id}_{session_date}_voluntary_movement_test.png"
-        save_path = results_dir / filename
-        fig.savefig(save_path, dpi=150, bbox_inches='tight')
-        print(f"  Saved voluntary movement analysis to {save_path}")
-
-    # Compile statistics
-    stats_dict = {
-        'n_trials': n_trials,
-        'mean_error': mean_error,
-        'median_error': median_error,
-        'std_error': std_error,
-        'random_mean': random_mean,
-        't_statistic': t_stat,
-        't_pvalue': t_pvalue,
-        'ks_statistic': ks_stat,
-        'ks_pvalue': ks_pvalue,
-        'is_voluntary': is_voluntary,
-    }
-
-    # Print summary
-    print(f"\n  Observed mean direction error: {mean_error:.1f}° (±{std_error:.1f}°)")
-    print(f"  Random model expectation: {random_mean:.1f}°")
-    print(f"  Difference: {random_mean - mean_error:.1f}° better than random")
-    print(f"\n  t-test (mean < 90°): t={t_stat:.2f}, p={t_pvalue:.4e}")
-    print(f"  KS test (vs uniform): D={ks_stat:.3f}, p={ks_pvalue:.4e}")
-
-    if is_voluntary:
-        print(f"\n  *** CONCLUSION: Strong evidence for VOLUNTARY TARGETED movements ***")
-        print(f"      - Mean direction error ({mean_error:.1f}°) << random (90°)")
-        print(f"      - Distribution significantly different from uniform (p < 0.05)")
-    elif t_pvalue < 0.05:
-        print(f"\n  *** CONCLUSION: Evidence for targeted movements (mean < 90°, p < 0.05) ***")
-    else:
-        print(f"\n  *** CONCLUSION: Insufficient evidence for voluntary movements ***")
-
-    return fig, stats_dict
-
-
 def interactive_initial_direction_viewer(trials: list[dict], animal_id: Optional[str] = None,
                                          session_date: str = ""):
     """Interactive viewer showing initial direction vectors for each trial.
@@ -3326,7 +2662,7 @@ def interactive_initial_direction_viewer(trials: list[dict], animal_id: Optional
 
 # Fixation detection parameters - shared across analysis functions
 FIXATION_MIN_DURATION = 0.5  # seconds
-FIXATION_MAX_MOVEMENT = 0.12  # stimulus units
+FIXATION_MAX_MOVEMENT = 0.1  # stimulus units
 def interactive_fixation_viewer(trials: list[dict], animal_id: Optional[str] = None,
                                  session_date: str = "", 
                                  min_duration: float = FIXATION_MIN_DURATION,
@@ -3573,8 +2909,7 @@ def interactive_fixation_viewer(trials: list[dict], animal_id: Optional[str] = N
 
 def save_detailed_fixation_data(trials: list[dict], results_dir: Optional[Path] = None,
                                   animal_id: Optional[str] = None, session_date: str = "",
-                                  min_duration: float = FIXATION_MIN_DURATION,
-                                  max_movement: float = FIXATION_MAX_MOVEMENT) -> pd.DataFrame:
+                                  vstim_go_fixation_df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
     """Save detailed frame-by-frame fixation data for all trials.
 
     For each detected fixation, saves all individual data points including:
@@ -3588,17 +2923,16 @@ def save_detailed_fixation_data(trials: list[dict], results_dir: Optional[Path] 
     Parameters
     ----------
     trials : list of dict
-        List of trial data dictionaries
+        List of trial data dictionaries (used for trial-level metadata like trial_failed)
     results_dir : Path, optional
         Directory to save CSV file. If None, doesn't save to disk.
     animal_id : str, optional
         Animal identifier for filename
     session_date : str, optional
         Session date for filename
-    min_duration : float
-        Minimum fixation duration in seconds (default: 0.5)
-    max_movement : float
-        Maximum movement threshold for fixation in stimulus units (default: 0.12)
+    vstim_go_fixation_df : pd.DataFrame, optional
+        DataFrame from create_vstim_go_fixation_csv containing fixation detection.
+        If provided, uses this for fixation detection (recommended for consistency).
 
     Returns
     -------
@@ -3615,167 +2949,121 @@ def save_detailed_fixation_data(trials: list[dict], results_dir: Optional[Path] 
     """
     import pandas as pd
 
-    def detect_fixations(eye_x, eye_y, eye_times):
-        """Detect fixation windows based on frame-to-frame movement velocity.
+    # Build trial metadata lookup from trials list
+    trial_metadata = {}
+    for trial in trials:
+        trial_num = trial.get('trial_number', 0)
+        trial_metadata[trial_num] = {
+            'trial_failed': trial.get('trial_failed', False),
+            'trial_duration': trial.get('duration', 0),
+            'trial_end_time': trial.get('end_time', 0),
+            'target_visible': trial.get('target_visible', 1),
+        }
 
-        A fixation is a continuous segment where every consecutive frame-to-frame
-        movement is < max_movement, lasting for at least min_duration.
-
-        Returns list of tuples: (start_idx, end_idx, duration, span)
-        where span is calculated for informational purposes but NOT used for detection.
-        """
-        if len(eye_x) < 2:
-            return []
-
-        n = len(eye_x)
-        fixations = []
-
-        i = 0
-        while i < n:
-            # Try to extend a fixation starting at point i
-            j = i + 1
-
-            # Extend while frame-to-frame movement is below threshold
-            while j < n:
-                # Calculate movement from point j-1 to point j
-                dx = eye_x[j] - eye_x[j-1]
-                dy = eye_y[j] - eye_y[j-1]
-                movement = np.sqrt(dx**2 + dy**2)
-
-                if movement < max_movement:
-                    j += 1  # Include point j in the fixation
-                else:
-                    break  # Movement too large, stop before point j
-
-            # Now we have a potential fixation from index i to j (exclusive end)
-            # This includes points [i, i+1, ..., j-1]
-
-            if j > i + 1:  # At least 2 points
-                duration = eye_times[j-1] - eye_times[i]
-                if duration >= min_duration:
-                    # Valid fixation! Calculate span for informational purposes
-                    fix_x = eye_x[i:j]
-                    fix_y = eye_y[i:j]
-                    x_range = np.max(fix_x) - np.min(fix_x)
-                    y_range = np.max(fix_y) - np.min(fix_y)
-                    span = np.sqrt(x_range**2 + y_range**2)
-                    fixations.append((i, j, duration, span))
-                    i = j  # Start next search after this fixation
-                else:
-                    i += 1  # Duration too short, try next starting point
-            else:
-                i += 1  # No valid extension, try next starting point
-
-        return fixations
-
-    # Filter to trials with eye data
-    trials_with_data = [t for t in trials if len(t.get('eye_x', [])) > 0]
-
-    if len(trials_with_data) == 0:
-        print("No trials with eye tracking data")
+    if vstim_go_fixation_df is None or len(vstim_go_fixation_df) == 0:
+        print("No vstim_go_fixation_df provided - cannot generate detailed fixation data")
         return pd.DataFrame()
 
-    print(f"Processing {len(trials_with_data)} trials for detailed fixation data...")
-    print(f"Fixation criteria: ≥{min_duration}s duration, frame-to-frame movement <{max_movement} units")
+    # Filter to only fixation frames during trials
+    fix_df = vstim_go_fixation_df[
+        (vstim_go_fixation_df['in_fixation'] == True) &
+        (vstim_go_fixation_df['trial_number'] > 0)
+    ].copy()
+
+    if len(fix_df) == 0:
+        print("No fixation frames found in vstim_go_fixation_df")
+        return pd.DataFrame()
+
+    print(f"Processing fixation data from vstim_go_fixation_df...")
+    print(f"Found {len(fix_df)} fixation frames across {fix_df['trial_number'].nunique()} trials")
 
     # Collect all data points for all fixations
     all_fixation_data = []
-    total_fixations = 0
 
-    for trial in trials_with_data:
-        eye_x = np.array(trial['eye_x'])
-        eye_y = np.array(trial['eye_y'])
-        eye_times = np.array(trial.get('eye_times', np.arange(len(eye_x))))
-        eye_frames = np.array(trial.get('eye_frames', np.arange(len(eye_x))))  # Absolute frame numbers
-        target_x = trial['target_x']
-        target_y = trial['target_y']
-        target_radius = trial['target_diameter'] / 2.0
-        cursor_radius = trial.get('cursor_diameter', 0.2) / 2.0  # Default to 0.2 if not present
-        trial_num = trial.get('trial_number', 0)
-        target_visible = trial.get('target_visible', 1)
-        trial_failed = trial.get('trial_failed', False)
-        trial_duration = trial.get('duration', 0)
-        trial_end_time = trial.get('end_time', eye_times[-1] if len(eye_times) > 0 else 0)
+    # Process each trial
+    for trial_num in sorted(fix_df['trial_number'].unique()):
+        trial_fix = fix_df[fix_df['trial_number'] == trial_num].copy()
 
-        # Detect fixations for this trial
-        fixations = detect_fixations(eye_x, eye_y, eye_times)
+        # Get trial metadata
+        meta = trial_metadata.get(trial_num, {
+            'trial_failed': False,
+            'trial_duration': 0,
+            'trial_end_time': trial_fix['timestamp'].max() if len(trial_fix) > 0 else 0,
+            'target_visible': 1,
+        })
 
-        # For each fixation, save all individual data points
-        for fix_num, (start_idx, end_idx, duration, span) in enumerate(fixations, start=1):
-            total_fixations += 1
+        # Process each fixation in this trial
+        for fix_id in sorted(trial_fix['fixation_id'].unique()):
+            if fix_id == 0:  # Skip non-fixation frames
+                continue
+
+            fixation_frames = trial_fix[trial_fix['fixation_id'] == fix_id].sort_values('frame')
+
+            if len(fixation_frames) == 0:
+                continue
 
             # Calculate fixation-level metrics
-            fix_x = eye_x[start_idx:end_idx]
-            fix_y = eye_y[start_idx:end_idx]
-            fix_times = eye_times[start_idx:end_idx]
+            fix_x = fixation_frames['eye_x'].values
+            fix_y = fixation_frames['eye_y'].values
+            fix_times = fixation_frames['timestamp'].values
+            fix_frames = fixation_frames['frame'].values
 
-            # Calculate distances from target for all points in fixation
-            fix_distances = np.sqrt((fix_x - target_x)**2 + (fix_y - target_y)**2)
+            # Fixation duration and span
+            duration = fix_times[-1] - fix_times[0]
+            x_range = np.max(fix_x) - np.min(fix_x)
+            y_range = np.max(fix_y) - np.min(fix_y)
+            span = np.sqrt(x_range**2 + y_range**2)
+
+            # Target info (should be same for all frames in trial)
+            target_x = fixation_frames['target_x'].iloc[0]
+            target_y = fixation_frames['target_y'].iloc[0]
+            target_radius = fixation_frames['target_radius'].iloc[0]
+            cursor_radius = fixation_frames['cursor_radius'].iloc[0]
+            contact_threshold = fixation_frames['contact_threshold'].iloc[0]
+
+            # Distance metrics
+            fix_distances = fixation_frames['distance_from_target'].values
             max_dist_in_fixation = np.max(fix_distances)
             min_dist_in_fixation = np.min(fix_distances)
 
-            # Check if ALL points are within target radius + cursor radius (i.e., cursor touching target)
-            # A point is "on target" when the distance from eye to target center <= (target_radius + cursor_radius)
-            contact_threshold = target_radius + cursor_radius
-            all_points_within_target = np.all(fix_distances <= contact_threshold)
+            # Check if ALL points are within contact threshold
+            all_points_within_target = fixation_frames['within_contact_threshold'].all()
 
-            # Calculate time from end of fixation to end of trial
+            # Time from end of fixation to end of trial
             fixation_end_time = fix_times[-1]
+            trial_end_time = meta['trial_end_time']
+            if trial_end_time == 0:
+                # Estimate from last frame in trial
+                trial_frames = vstim_go_fixation_df[vstim_go_fixation_df['trial_number'] == trial_num]
+                trial_end_time = trial_frames['timestamp'].max() if len(trial_frames) > 0 else fixation_end_time
             time_to_trial_end = trial_end_time - fixation_end_time
 
-            # Determine if this is a potential missed detection
-            # Criteria: fixation is on target (all points within radius) AND
-            #           trial doesn't end promptly (>0.5s after fixation ends)
-            is_potential_missed_detection = (all_points_within_target and
-                                            time_to_trial_end > 0.5)
+            # Potential missed detection
+            is_potential_missed_detection = (all_points_within_target and time_to_trial_end > 0.5)
 
-            # Iterate through all frames in this fixation
-            for idx_within_fixation, frame_idx in enumerate(range(start_idx, end_idx)):
-                pos_x = eye_x[frame_idx]
-                pos_y = eye_y[frame_idx]
-                time_sec = eye_times[frame_idx]
-                absolute_frame = int(eye_frames[frame_idx])  # Absolute frame number from vstim_go
-
-                # Calculate distance from target for this specific point
-                distance_from_target = np.sqrt((pos_x - target_x)**2 + (pos_y - target_y)**2)
-
-                # Point-specific temporal metrics
-                time_since_fixation_start = time_sec - fix_times[0]
-                time_until_fixation_end = fixation_end_time - time_sec
-
-                # Point-specific spatial metrics
-                point_within_target = distance_from_target <= contact_threshold
-
-                # Frame-to-frame movement (velocity) at this point
-                if frame_idx > start_idx:
-                    prev_x = eye_x[frame_idx - 1]
-                    prev_y = eye_y[frame_idx - 1]
-                    frame_to_frame_movement = np.sqrt((pos_x - prev_x)**2 + (pos_y - prev_y)**2)
-                else:
-                    frame_to_frame_movement = 0.0  # First point has no previous movement
-
-                # Add data point to list
+            # Add each frame in this fixation
+            for idx, (_, row) in enumerate(fixation_frames.iterrows()):
                 all_fixation_data.append({
                     'trial_number': trial_num,
-                    'fixation_number': fix_num,
-                    'frame_number': absolute_frame,
-                    'point_index_in_fixation': idx_within_fixation,
-                    'eye_x': pos_x,
-                    'eye_y': pos_y,
-                    'distance_from_target': distance_from_target,
-                    'point_within_target': point_within_target,
-                    'frame_to_frame_movement': frame_to_frame_movement,
-                    'time_sec': time_sec,
-                    'time_since_fixation_start': time_since_fixation_start,
-                    'time_until_fixation_end': time_until_fixation_end,
+                    'fixation_number': fix_id,
+                    'frame_number': int(row['frame']),
+                    'point_index_in_fixation': idx,
+                    'eye_x': row['eye_x'],
+                    'eye_y': row['eye_y'],
+                    'distance_from_target': row['distance_from_target'],
+                    'point_within_target': row['within_contact_threshold'],
+                    'frame_to_frame_movement': row['frame_to_frame_movement'],
+                    'time_sec': row['timestamp'],
+                    'time_since_fixation_start': row['timestamp'] - fix_times[0],
+                    'time_until_fixation_end': fixation_end_time - row['timestamp'],
                     'target_x': target_x,
                     'target_y': target_y,
                     'target_radius': target_radius,
                     'cursor_radius': cursor_radius,
                     'contact_threshold': contact_threshold,
-                    'target_visible': target_visible,
-                    'trial_failed': trial_failed,
-                    'trial_duration': trial_duration,
+                    'target_visible': meta['target_visible'],
+                    'trial_failed': meta['trial_failed'],
+                    'trial_duration': meta['trial_duration'],
                     'fixation_duration': duration,
                     'fixation_span': span,
                     'fixation_start_time': fix_times[0],
@@ -3790,7 +3078,15 @@ def save_detailed_fixation_data(trials: list[dict], results_dir: Optional[Path] 
     # Create DataFrame
     df = pd.DataFrame(all_fixation_data)
 
-    print(f"Found {total_fixations} fixations across {len(trials_with_data)} trials")
+    # Count unique fixations
+    if len(df) > 0:
+        n_fixations = df.groupby(['trial_number', 'fixation_number']).ngroups
+        n_trials = df['trial_number'].nunique()
+    else:
+        n_fixations = 0
+        n_trials = 0
+
+    print(f"Found {n_fixations} fixations across {n_trials} trials")
     print(f"Total data points: {len(df)}")
 
     # Summary of on-target fixations and potential missed detections
@@ -4030,11 +3326,8 @@ def create_vstim_go_fixation_csv(folder_path: Path, results_dir: Optional[Path] 
 
         return fixations
 
-    # Process each trial
+    # Process each trial (including inter-trial intervals where trial_number=0)
     for trial_num in eye_df['trial_number'].unique():
-        if trial_num == 0:  # Skip inter-trial intervals
-            continue
-
         trial_mask = eye_df['trial_number'] == trial_num
         fixations = detect_fixations_for_trial(trial_mask)
 
@@ -4049,8 +3342,11 @@ def create_vstim_go_fixation_csv(folder_path: Path, results_dir: Optional[Path] 
                 eye_df.at[row_idx, 'point_index_in_fixation'] = idx
                 eye_df.at[row_idx, 'time_since_fixation_start'] = row['timestamp'] - start_time
 
-    print(f"Processed {len(eye_df)} frames across {eye_df['trial_number'].nunique() - 1} trials")
-    print(f"Detected {eye_df['in_fixation'].sum()} frames in fixations")
+    n_trials = eye_df['trial_number'].nunique()
+    has_iti = 0 in eye_df['trial_number'].values
+    trial_desc = f"{n_trials - 1} trials + inter-trial intervals" if has_iti else f"{n_trials} trials"
+    print(f"Processed {len(eye_df)} frames across {trial_desc}")
+    print(f"Detected {eye_df['in_fixation'].sum()} frames in fixations (including inter-trial intervals)")
 
     # Save to CSV
     if results_dir is not None:
@@ -4067,162 +3363,10 @@ def create_vstim_go_fixation_csv(folder_path: Path, results_dir: Optional[Path] 
 
     return eye_df
 
-
-def compare_fixation_detection(folder_path: Path, vstim_go_fixation_df: Optional[pd.DataFrame] = None,
-                                results_dir: Optional[Path] = None,
-                                animal_id: Optional[str] = None, session_date: str = "") -> pd.DataFrame:
-    """Compare offline fixation detection with task's real-time fixation log.
-
-    Compares fixations detected by our analysis (vstim_go_fixation) with those
-    detected in real-time by the task (fixationlog.csv).
-
-    Parameters
-    ----------
-    folder_path : Path
-        Path to session folder containing fixationlog.csv
-    vstim_go_fixation_df : pd.DataFrame, optional
-        DataFrame from create_vstim_go_fixation_csv (if already loaded)
-    results_dir : Path, optional
-        Directory to save comparison CSV
-    animal_id : str, optional
-        Animal identifier for filename
-    session_date : str, optional
-        Session date for filename
-
-    Returns
-    -------
-    pd.DataFrame
-        Comparison results per trial
-    """
-    import pandas as pd
-
-    print(f"\nComparing fixation detection...")
-    folder_path = Path(folder_path)
-
-    # Load fixationlog.csv from task
-    fixlog_file = None
-    for f in folder_path.glob("*fixationlog*.csv"):
-        fixlog_file = f
-        break
-
-    if fixlog_file is None:
-        print("  No fixationlog.csv found in folder - cannot compare")
-        return pd.DataFrame()
-
-    print(f"  Loading task fixation log: {fixlog_file.name}")
-    try:
-        fixlog_df = pd.read_csv(fixlog_file)
-        print(f"    Loaded {len(fixlog_df)} fixation events from task")
-    except Exception as e:
-        print(f"    Error loading fixationlog: {e}")
-        return pd.DataFrame()
-
-    # Load vstim_go_fixation if not provided
-    if vstim_go_fixation_df is None:
-        vstim_go_fix_file = None
-        for f in (results_dir or folder_path).glob("*vstim_go_fixation*.csv"):
-            vstim_go_fix_file = f
-            break
-
-        if vstim_go_fix_file is None:
-            print("  No vstim_go_fixation.csv found - run create_vstim_go_fixation_csv first")
-            return pd.DataFrame()
-
-        print(f"  Loading offline fixation analysis: {vstim_go_fix_file.name}")
-        vstim_go_fixation_df = pd.read_csv(vstim_go_fix_file)
-
-    # Get our detected fixations (grouped by trial and fixation_id)
-    our_fixations = vstim_go_fixation_df[
-        (vstim_go_fixation_df['in_fixation'] == True) &
-        (vstim_go_fixation_df['trial_number'] > 0)
-    ].copy()
-
-    # Group by trial and fixation to get fixation summaries
-    our_fix_summary = our_fixations.groupby(['trial_number', 'fixation_id']).agg({
-        'timestamp': ['min', 'max', 'count'],
-        'within_contact_threshold': 'all',  # All points on target?
-        'distance_from_target': 'mean'
-    }).reset_index()
-
-    our_fix_summary.columns = ['trial_number', 'fixation_id', 'start_time', 'end_time',
-                                'n_frames', 'all_on_target', 'mean_distance']
-    our_fix_summary['duration'] = our_fix_summary['end_time'] - our_fix_summary['start_time']
-
-    print(f"    Our offline analysis: {len(our_fix_summary)} fixations across {our_fix_summary['trial_number'].nunique()} trials")
-
-    # Analyze task's fixation log by trial
-    # (Structure depends on what's in fixationlog.csv - you may need to adjust this)
-    trial_col = None
-    for col in ['trial', 'trial_number', 'trial_num']:
-        if col in fixlog_df.columns:
-            trial_col = col
-            break
-
-    if trial_col:
-        task_fixations_per_trial = fixlog_df.groupby(trial_col).size()
-        print(f"    Task real-time: {len(fixlog_df)} fixation events across {task_fixations_per_trial.index.nunique()} trials")
-    else:
-        print(f"    Task real-time: {len(fixlog_df)} fixation events (no trial column found)")
-        task_fixations_per_trial = pd.Series()
-
-    # Compare by trial
-    comparison_data = []
-
-    for trial_num in our_fix_summary['trial_number'].unique():
-        our_trial_fixes = our_fix_summary[our_fix_summary['trial_number'] == trial_num]
-        n_our_fixes = len(our_trial_fixes)
-        n_our_on_target = our_trial_fixes['all_on_target'].sum()
-
-        # Get task fixations for this trial
-        if trial_col:
-            task_trial_fixes = fixlog_df[fixlog_df[trial_col] == trial_num]
-            n_task_fixes = len(task_trial_fixes)
-        else:
-            n_task_fixes = 0  # Can't match without trial info
-
-        comparison_data.append({
-            'trial_number': trial_num,
-            'our_fixations': n_our_fixes,
-            'our_on_target_fixations': n_our_on_target,
-            'task_fixations': n_task_fixes,
-            'difference': n_our_fixes - n_task_fixes,
-            'potential_missed_by_task': max(0, n_our_on_target - n_task_fixes)
-        })
-
-    comparison_df = pd.DataFrame(comparison_data)
-
-    # Print summary
-    print(f"\n  Comparison Summary:")
-    print(f"    Trials analyzed: {len(comparison_df)}")
-    print(f"    Total our fixations: {comparison_df['our_fixations'].sum()}")
-    print(f"    Total task fixations: {comparison_df['task_fixations'].sum()}")
-    print(f"    Trials where we detected MORE fixations: {(comparison_df['difference'] > 0).sum()}")
-    print(f"    Trials where task detected MORE fixations: {(comparison_df['difference'] < 0).sum()}")
-    print(f"    Trials with perfect match: {(comparison_df['difference'] == 0).sum()}")
-
-    if comparison_df['potential_missed_by_task'].sum() > 0:
-        print(f"    Potential missed detections by task: {comparison_df['potential_missed_by_task'].sum()} on-target fixations")
-
-    # Save comparison
-    if results_dir is not None:
-        results_dir = Path(results_dir)
-        results_dir.mkdir(parents=True, exist_ok=True)
-
-        filename = f"{animal_id}_fixation_comparison.csv" if animal_id else "fixation_comparison.csv"
-        if session_date:
-            filename = f"{animal_id}_{session_date}_fixation_comparison.csv"
-
-        filepath = results_dir / filename
-        comparison_df.to_csv(filepath, index=False)
-        print(f"  Saved comparison to: {filepath}")
-
-    return comparison_df
-
-
 def compare_fixations_frame_by_frame(folder_path: Path, vstim_go_fixation_df: Optional[pd.DataFrame] = None,
                                       results_dir: Optional[Path] = None,
                                       animal_id: Optional[str] = None, session_date: str = "",
-                                      min_duration: float = FIXATION_MIN_DURATION) -> Tuple[pd.DataFrame, pd.DataFrame]:
+                                      min_duration: float = FIXATION_MIN_DURATION) -> pd.DataFrame:
     """Compare fixations frame-by-frame between task's fixationlog and our vstim_go_fixation.
 
     The task's fixationlog.csv has a last column where 0 indicates a fixation was detected
@@ -4253,10 +3397,8 @@ def compare_fixations_frame_by_frame(folder_path: Path, vstim_go_fixation_df: Op
 
     Returns
     -------
-    Tuple[pd.DataFrame, pd.DataFrame]
-        (fixationlog_with_agreement, comparison_summary)
-        - fixationlog_with_agreement: Original fixationlog with added columns
-        - comparison_summary: Summary statistics of the comparison
+    pd.DataFrame
+        fixationlog with added columns: task_in_fixation, our_in_fixation, agreement, trial_number
     """
     import pandas as pd
 
@@ -4272,7 +3414,7 @@ def compare_fixations_frame_by_frame(folder_path: Path, vstim_go_fixation_df: Op
 
     if fixlog_file is None:
         print("  No fixationlog.csv found in folder - cannot compare")
-        return pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame()
 
     print(f"  Loading task fixation log: {fixlog_file.name}")
     try:
@@ -4281,7 +3423,7 @@ def compare_fixations_frame_by_frame(folder_path: Path, vstim_go_fixation_df: Op
         print(f"    Columns: {list(fixlog_df.columns)}")
     except Exception as e:
         print(f"    Error loading fixationlog: {e}")
-        return pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame()
 
     # Load vstim_go_fixation if not provided
     if vstim_go_fixation_df is None:
@@ -4298,7 +3440,7 @@ def compare_fixations_frame_by_frame(folder_path: Path, vstim_go_fixation_df: Op
 
         if vstim_go_fix_file is None:
             print("  No vstim_go_fixation.csv found - run create_vstim_go_fixation_csv first")
-            return pd.DataFrame(), pd.DataFrame()
+            return pd.DataFrame()
 
         print(f"  Loading offline fixation analysis: {vstim_go_fix_file.name}")
         vstim_go_fixation_df = pd.read_csv(vstim_go_fix_file)
@@ -4336,7 +3478,7 @@ def compare_fixations_frame_by_frame(folder_path: Path, vstim_go_fixation_df: Op
 
     if frame_col is None and timestamp_col is None:
         print("  Error: Could not identify frame or timestamp column in fixationlog")
-        return pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame()
 
     # Process fixationlog to identify frames that are part of fixations
     # When last_col == 0, that frame and previous min_duration seconds are in fixation
@@ -4395,22 +3537,45 @@ def compare_fixations_frame_by_frame(folder_path: Path, vstim_go_fixation_df: Op
     task_in_fix_count = fixlog_df['task_in_fixation'].sum()
     print(f"  After lookback processing: {task_in_fix_count} frames marked as in fixation by task")
 
-    # Merge fixationlog with vstim_go_fixation by frame number
-    merge_col = frame_col if frame_col else None
-    if merge_col and merge_col in fixlog_df.columns and 'frame' in vstim_go_fixation_df.columns:
-        # Merge on frame number
-        merged_df = pd.merge(
-            fixlog_df,
-            vstim_go_fixation_df[['frame', 'in_fixation', 'trial_number', 'within_contact_threshold']],
-            left_on=merge_col,
-            right_on='frame',
-            how='left',
-            suffixes=('', '_our')
+    # Merge fixationlog with vstim_go_fixation using nearest timestamp match
+    # (frame numbers may differ slightly between the two sources)
+    if timestamp_col and 'timestamp' in vstim_go_fixation_df.columns:
+        # Sort both by timestamp for merge_asof
+        fixlog_df_sorted = fixlog_df.sort_values(timestamp_col).copy()
+        vstim_sorted = vstim_go_fixation_df[['timestamp', 'frame', 'in_fixation', 'trial_number', 'within_contact_threshold']].sort_values('timestamp').copy()
+
+        # Use merge_asof to find nearest timestamp match
+        merged_df = pd.merge_asof(
+            fixlog_df_sorted,
+            vstim_sorted,
+            left_on=timestamp_col,
+            right_on='timestamp',
+            direction='nearest',
+            tolerance=0.1,  # Allow up to 100ms difference
+            suffixes=('', '_vstim')
         )
-        print(f"  Merged {len(merged_df)} frames by frame number")
+        print(f"  Merged {len(merged_df)} frames by nearest timestamp (tolerance=0.1s)")
+
+        # Check how many matched
+        matched_count = merged_df['in_fixation'].notna().sum()
+        print(f"  Successfully matched: {matched_count}/{len(merged_df)} frames")
+    elif frame_col and 'frame' in vstim_go_fixation_df.columns:
+        # Fallback: try merge_asof on frame number
+        fixlog_df_sorted = fixlog_df.sort_values(frame_col).copy()
+        vstim_sorted = vstim_go_fixation_df[['frame', 'in_fixation', 'trial_number', 'within_contact_threshold']].sort_values('frame').copy()
+
+        merged_df = pd.merge_asof(
+            fixlog_df_sorted,
+            vstim_sorted,
+            left_on=frame_col,
+            right_on='frame',
+            direction='nearest',
+            tolerance=5,  # Allow up to 5 frame difference
+            suffixes=('', '_vstim')
+        )
+        print(f"  Merged {len(merged_df)} frames by nearest frame number (tolerance=5)")
     else:
-        # Try to merge by timestamp if available
-        print("  Warning: Could not merge by frame number, attempting timestamp-based comparison")
+        print("  Warning: Could not merge - no timestamp or frame column found")
         merged_df = fixlog_df.copy()
         merged_df['in_fixation'] = np.nan
         merged_df['trial_number'] = 0
@@ -4456,15 +3621,6 @@ def compare_fixations_frame_by_frame(folder_path: Path, vstim_go_fixation_df: Op
     print(f"    We detect, task doesn't (FP): {fp} frames ({fp/total_trial_frames*100:.1f}%)")
     print(f"    Task detects, we don't (FN): {fn} frames ({fn/total_trial_frames*100:.1f}%)")
 
-    # Create summary dataframe
-    summary_data = {
-        'metric': ['total_trial_frames', 'agreement_rate', 'true_positives', 'true_negatives',
-                   'false_positives', 'false_negatives', 'task_fixation_frames', 'our_fixation_frames'],
-        'value': [total_trial_frames, agreement_rate, tp, tn, fp, fn,
-                  trial_df['task_in_fixation'].sum(), trial_df['our_in_fixation'].sum()]
-    }
-    summary_df = pd.DataFrame(summary_data)
-
     # Prepare output dataframe (fixationlog with added columns)
     output_cols = list(fixlog_df.columns) + ['task_in_fixation', 'our_in_fixation', 'agreement']
     if 'trial_number' in merged_df.columns:
@@ -4472,7 +3628,7 @@ def compare_fixations_frame_by_frame(folder_path: Path, vstim_go_fixation_df: Op
 
     output_df = merged_df[[c for c in output_cols if c in merged_df.columns]].copy()
 
-    # Save outputs if results_dir provided
+    # Save output if results_dir provided
     if results_dir is not None:
         results_dir = Path(results_dir)
         results_dir.mkdir(parents=True, exist_ok=True)
@@ -4485,631 +3641,7 @@ def compare_fixations_frame_by_frame(folder_path: Path, vstim_go_fixation_df: Op
         output_df.to_csv(fixlog_output_path, index=False)
         print(f"\n  Saved fixationlog with agreement to: {fixlog_output_path}")
 
-        # Save summary
-        summary_output_path = results_dir / f"{prefix}fixation_comparison_summary.csv"
-        summary_df.to_csv(summary_output_path, index=False)
-        print(f"  Saved comparison summary to: {summary_output_path}")
-
-    return output_df, summary_df
-
-
-# NEW: Fixation targeting analysis function
-def plot_fixation_targeting_analysis(trials: list[dict], results_dir: Optional[Path] = None,
-                                      animal_id: Optional[str] = None, session_date: str = "",
-                                      min_duration: float = FIXATION_MIN_DURATION, 
-                                      max_movement: float = FIXATION_MAX_MOVEMENT):
-    """Plot all fixations for left vs right target trials and test if targeted.
-
-    Detects fixations (windows ≥ min_duration seconds with movement ≤ max_movement units)
-    and analyzes whether fixations are targeted to the visible target or random.
-
-    Args:
-        trials: List of trial dictionaries
-        results_dir: Directory to save results
-        animal_id: Animal ID for plot title
-        session_date: Session date for plot title
-        min_duration: Minimum fixation duration in seconds (default 0.7)
-        max_movement: Maximum movement during fixation in units (default 0.08)
-    """
-    import numpy as np
-    import matplotlib.pyplot as plt
-    from matplotlib.patches import Circle
-
-    # Collect all fixations separated by target position AND visibility
-    left_visible_fixations = []  # Each element: (center_x, center_y, span, distance_to_target, within_target)
-    left_invisible_fixations = []
-    right_visible_fixations = []
-    right_invisible_fixations = []
-
-    # Also collect actual target positions
-    left_target_positions = []
-    right_target_positions = []
-
-    print(f"  Processing {len(trials)} trials for fixation detection...")
-    n_trials_with_data = 0
-
-    for trial in trials:
-        # Skip trials without eye data
-        if 'eye_x' not in trial or 'eye_y' not in trial or 'eye_times' not in trial:
-            continue
-        if len(trial['eye_x']) == 0:
-            continue
-
-        n_trials_with_data += 1
-        eye_x = trial['eye_x']
-        eye_y = trial['eye_y']
-        eye_t = trial['eye_times']
-        target_x = trial.get('target_x', 0.0)
-        target_y = trial.get('target_y', 0.0)
-        target_radius = trial.get('target_diameter', 0.3) / 2.0 if 'target_diameter' in trial else trial.get('target_radius', 0.15)
-        cursor_radius = trial.get('cursor_diameter', 0.2) / 2.0
-        target_visible = trial.get('target_visible', 1)
-
-        # Determine if target is left or right
-        start_x = eye_x[0]
-        is_left_target = target_x < start_x
-        is_visible = target_visible == 1
-
-        # Collect target positions for later use
-        if is_left_target:
-            left_target_positions.append((target_x, target_y, target_radius))
-        else:
-            right_target_positions.append((target_x, target_y, target_radius))
-
-
-        # Detect fixations using sliding window
-        fixations = []
-        i = 0
-        while i < len(eye_t):
-            # Find the end of a potential fixation window
-            t_start = eye_t[i]
-            j = i
-            max_span = 0.0
-
-            # Expand window as long as spatial extent is within threshold
-            while j < len(eye_t):
-                # Calculate spatial extent from start to current position
-                x_span = max(eye_x[i:j+1]) - min(eye_x[i:j+1])
-                y_span = max(eye_y[i:j+1]) - min(eye_y[i:j+1])
-                spatial_extent = np.sqrt(x_span**2 + y_span**2)
-
-                if spatial_extent <= max_movement:
-                    max_span = spatial_extent
-                    j += 1
-                else:
-                    break
-
-            # Check if window duration meets minimum
-            t_end = eye_t[j-1] if j > i else t_start
-            duration = t_end - t_start
-
-            if duration >= min_duration:
-                # Valid fixation found
-                fix_x = eye_x[i:j]
-                fix_y = eye_y[i:j]
-                center_x = np.mean(fix_x)
-                center_y = np.mean(fix_y)
-                span = max_span
-
-                # Calculate distance to target
-                dist_to_target = np.sqrt((center_x - target_x)**2 + (center_y - target_y)**2)
-                # Check if fixation is "on target" accounting for both target and cursor sizes
-                contact_threshold = target_radius + cursor_radius
-                within_target = dist_to_target <= contact_threshold
-
-                fixation_info = (center_x, center_y, span, dist_to_target, within_target)
-
-                # Append to appropriate list based on target position AND visibility
-                if is_left_target and is_visible:
-                    left_visible_fixations.append(fixation_info)
-                elif is_left_target and not is_visible:
-                    left_invisible_fixations.append(fixation_info)
-                elif not is_left_target and is_visible:
-                    right_visible_fixations.append(fixation_info)
-                else:  # right and invisible
-                    right_invisible_fixations.append(fixation_info)
-
-                i = j  # Skip past this fixation
-            else:
-                i += 1
-
-    print(f"  Found fixations from {n_trials_with_data} trials with data:")
-    print(f"    Left Visible: {len(left_visible_fixations)}, Left Invisible: {len(left_invisible_fixations)}")
-    print(f"    Right Visible: {len(right_visible_fixations)}, Right Invisible: {len(right_invisible_fixations)}")
-
-    # Create figure with 6 subplots (4 fixation plots + mean positions + stats)
-    fig = plt.figure(figsize=(18, 14))
-
-    # Extract actual target positions from collected data
-    if left_target_positions:
-        left_target_x = np.median([t[0] for t in left_target_positions])
-        left_target_y = np.median([t[1] for t in left_target_positions])
-    else:
-        left_target_x = -0.5
-        left_target_y = 0.0
-    
-    if right_target_positions:
-        right_target_x = np.median([t[0] for t in right_target_positions])
-        right_target_y = np.median([t[1] for t in right_target_positions])
-    else:
-        right_target_x = 0.5
-        right_target_y = 0.0
-    
-    # Use average y position (assumes both targets roughly at same y)
-    target_y = np.mean([left_target_y, right_target_y])
-    
-    # Get target radius from first available position
-    if left_target_positions:
-        target_radius = left_target_positions[0][2]
-    elif right_target_positions:
-        target_radius = right_target_positions[0][2]
-    else:
-        target_radius = 0.15
-
-    # Helper function to plot fixations
-    def plot_fixation_group(ax, fixations, target_x, target_y, other_target_x, title, target_label, other_label):
-        if fixations:
-            centers_x = [f[0] for f in fixations]
-            centers_y = [f[1] for f in fixations]
-            spans = [f[2] for f in fixations]
-
-            # Plot fixation centers with size proportional to span
-            scatter = ax.scatter(centers_x, centers_y, c=spans, cmap='viridis',
-                                s=100, alpha=0.6, edgecolors='black', linewidths=0.5)
-            plt.colorbar(scatter, ax=ax, label='Fixation Span')
-
-            # Draw this target circle (red - the actual target)
-            circle = Circle((target_x, target_y), target_radius,
-                           fill=False, edgecolor='red', linewidth=2, linestyle='--', label=target_label)
-            ax.add_patch(circle)
-
-        # Draw other target circle (black - the other target)
-        circle_other = Circle((other_target_x, target_y), target_radius,
-                             fill=False, edgecolor='black', linewidth=1.5, linestyle=':', label=other_label)
-        ax.add_patch(circle_other)
-
-        ax.set_xlabel('X Position')
-        ax.set_ylabel('Y Position')
-        ax.set_title(title)
-        ax.grid(True, alpha=0.3)
-        ax.set_aspect('equal')
-
-    # Plot 1: Left Visible fixations
-    ax1 = plt.subplot(3, 2, 1)
-    plot_fixation_group(ax1, left_visible_fixations, left_target_x, target_y, right_target_x,
-                       f'Left VISIBLE Target (n={len(left_visible_fixations)})', 'Left Target', 'Right Target')
-
-    # Plot 2: Right Visible fixations
-    ax2 = plt.subplot(3, 2, 2)
-    plot_fixation_group(ax2, right_visible_fixations, right_target_x, target_y, left_target_x,
-                       f'Right VISIBLE Target (n={len(right_visible_fixations)})', 'Right Target', 'Left Target')
-
-    # Plot 3: Left Invisible fixations
-    ax3 = plt.subplot(3, 2, 3)
-    plot_fixation_group(ax3, left_invisible_fixations, left_target_x, target_y, right_target_x,
-                       f'Left INVISIBLE Target (n={len(left_invisible_fixations)})', 'Left Target', 'Right Target')
-
-    # Plot 4: Right Invisible fixations
-    ax4 = plt.subplot(3, 2, 4)
-    plot_fixation_group(ax4, right_invisible_fixations, right_target_x, target_y, left_target_x,
-                       f'Right INVISIBLE Target (n={len(right_invisible_fixations)})', 'Right Target', 'Left Target')
-
-    # Plot 5: Mean positions with variance visualization
-    ax5 = plt.subplot(3, 2, 5)
-
-    # Show mean positions as points with error bars for all 4 groups
-    colors = {'LV': 'blue', 'LI': 'cyan', 'RV': 'red', 'RI': 'orange'}
-
-    if left_visible_fixations:
-        lv_x = [f[0] for f in left_visible_fixations]
-        lv_y = [f[1] for f in left_visible_fixations]
-        ax5.errorbar(np.mean(lv_x), np.mean(lv_y), xerr=np.std(lv_x), yerr=np.std(lv_y),
-                    fmt='o', markersize=10, color=colors['LV'], ecolor=colors['LV'], capsize=5,
-                    alpha=0.7, label='Left Visible')
-
-    if left_invisible_fixations:
-        li_x = [f[0] for f in left_invisible_fixations]
-        li_y = [f[1] for f in left_invisible_fixations]
-        ax5.errorbar(np.mean(li_x), np.mean(li_y), xerr=np.std(li_x), yerr=np.std(li_y),
-                    fmt='s', markersize=10, color=colors['LI'], ecolor=colors['LI'], capsize=5,
-                    alpha=0.7, label='Left Invisible')
-
-    if right_visible_fixations:
-        rv_x = [f[0] for f in right_visible_fixations]
-        rv_y = [f[1] for f in right_visible_fixations]
-        ax5.errorbar(np.mean(rv_x), np.mean(rv_y), xerr=np.std(rv_x), yerr=np.std(rv_y),
-                    fmt='o', markersize=10, color=colors['RV'], ecolor=colors['RV'], capsize=5,
-                    alpha=0.7, label='Right Visible')
-
-    if right_invisible_fixations:
-        ri_x = [f[0] for f in right_invisible_fixations]
-        ri_y = [f[1] for f in right_invisible_fixations]
-        ax5.errorbar(np.mean(ri_x), np.mean(ri_y), xerr=np.std(ri_x), yerr=np.std(ri_y),
-                    fmt='s', markersize=10, color=colors['RI'], ecolor=colors['RI'], capsize=5,
-                    alpha=0.7, label='Right Invisible')
-
-    # Draw both targets
-    circle_left = Circle((left_target_x, target_y), target_radius,
-                        fill=False, edgecolor='black', linewidth=2, linestyle='--')
-    ax5.add_patch(circle_left)
-    circle_right = Circle((right_target_x, target_y), target_radius,
-                         fill=False, edgecolor='black', linewidth=2, linestyle='--')
-    ax5.add_patch(circle_right)
-
-    ax5.set_xlabel('X Position')
-    ax5.set_ylabel('Y Position')
-    ax5.set_title('Mean Fixation Positions with Variance')
-    ax5.grid(True, alpha=0.3)
-    ax5.legend(fontsize=8)
-    ax5.set_aspect('equal')
-
-    # Plot 6: Statistics table with position and variance quantification
-    ax6 = plt.subplot(3, 2, 6)
-    ax6.axis('off')
-
-    # Helper function to calculate stats for a group
-    def calc_stats(fixations):
-        if fixations:
-            x = [f[0] for f in fixations]
-            y = [f[1] for f in fixations]
-            within = sum([f[4] for f in fixations])
-            return {
-                'n': len(fixations),
-                'mean_x': np.mean(x),
-                'mean_y': np.mean(y),
-                'std_x': np.std(x),
-                'std_y': np.std(y),
-                'var_x': np.var(x),
-                'var_y': np.var(y),
-                'within': within,
-                'prop_within': within / len(fixations) if len(fixations) > 0 else 0.0
-            }
-        else:
-            return {'n': 0, 'mean_x': 0, 'mean_y': 0, 'std_x': 0, 'std_y': 0,
-                   'var_x': 0, 'var_y': 0, 'within': 0, 'prop_within': 0.0}
-
-    lv_stats = calc_stats(left_visible_fixations)
-    li_stats = calc_stats(left_invisible_fixations)
-    rv_stats = calc_stats(right_visible_fixations)
-    ri_stats = calc_stats(right_invisible_fixations)
-
-    # Create statistics text
-    stats_text = f"""
-FIXATION STATISTICS
-
-LEFT VISIBLE (n={lv_stats['n']}):
-  Mean: ({lv_stats['mean_x']:.4f}, {lv_stats['mean_y']:.4f})
-  Std:  ({lv_stats['std_x']:.4f}, {lv_stats['std_y']:.4f})
-  Var:  ({lv_stats['var_x']:.4f}, {lv_stats['var_y']:.4f})
-  Within Target: {lv_stats['within']}/{lv_stats['n']} ({lv_stats['prop_within']*100:.1f}%)
-
-LEFT INVISIBLE (n={li_stats['n']}):
-  Mean: ({li_stats['mean_x']:.4f}, {li_stats['mean_y']:.4f})
-  Std:  ({li_stats['std_x']:.4f}, {li_stats['std_y']:.4f})
-  Var:  ({li_stats['var_x']:.4f}, {li_stats['var_y']:.4f})
-  Within Target: {li_stats['within']}/{li_stats['n']} ({li_stats['prop_within']*100:.1f}%)
-
-RIGHT VISIBLE (n={rv_stats['n']}):
-  Mean: ({rv_stats['mean_x']:.4f}, {rv_stats['mean_y']:.4f})
-  Std:  ({rv_stats['std_x']:.4f}, {rv_stats['std_y']:.4f})
-  Var:  ({rv_stats['var_x']:.4f}, {rv_stats['var_y']:.4f})
-  Within Target: {rv_stats['within']}/{rv_stats['n']} ({rv_stats['prop_within']*100:.1f}%)
-
-RIGHT INVISIBLE (n={ri_stats['n']}):
-  Mean: ({ri_stats['mean_x']:.4f}, {ri_stats['mean_y']:.4f})
-  Std:  ({ri_stats['std_x']:.4f}, {ri_stats['std_y']:.4f})
-  Var:  ({ri_stats['var_x']:.4f}, {ri_stats['var_y']:.4f})
-  Within Target: {ri_stats['within']}/{ri_stats['n']} ({ri_stats['prop_within']*100:.1f}%)
-"""
-
-    ax6.text(0.05, 0.5, stats_text, fontsize=8, family='monospace',
-            verticalalignment='center', transform=ax6.transAxes)
-
-    # Overall title
-    title_parts = []
-    if animal_id:
-        title_parts.append(f'Animal: {animal_id}')
-    if session_date:
-        title_parts.append(f'Session: {session_date}')
-    title_parts.append(f'Fixation Criteria: ≥{min_duration}s, movement ≤{max_movement} units')
-
-    fig.suptitle(' | '.join(title_parts), fontsize=12, fontweight='bold')
-
-    plt.tight_layout(rect=[0, 0, 1, 0.97])
-
-    # Save if results directory provided
-    if results_dir:
-        results_dir = Path(results_dir)
-        results_dir.mkdir(parents=True, exist_ok=True)
-        save_path = results_dir / 'fixation_targeting_analysis.png'
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        print(f"\nSaved fixation targeting analysis to: {save_path}")
-
-    return fig
-
-
-def test_left_right_targeted_movement(trials: list[dict], results_dir: Optional[Path] = None,
-                                       animal_id: Optional[str] = None, session_date: str = "",
-                                       n_shuffles: int = 1000) -> tuple:
-    """Test whether animals make targeted left/right movements vs random (50% chance).
-
-    For prosaccade tasks with left/right targets only. Simplifies to binary classification:
-    - Is target left or right?
-    - Is initial movement left or right?
-    - Does initial movement match target direction?
-
-    Tests against random (50%) using:
-    1. Binomial test
-    2. Shuffle control (randomly permute target positions)
-
-    This function is standalone and can be easily removed without affecting other analyses.
-
-    Parameters
-    ----------
-    trials : list of dict
-        List of trial data dictionaries
-    results_dir : Path, optional
-        Directory to save the figure
-    animal_id : str, optional
-        Animal identifier for filename
-    session_date : str, optional
-        Session date for title
-    n_shuffles : int
-        Number of shuffle iterations for null distribution (default: 1000)
-
-    Returns
-    -------
-    tuple of (fig, stats_dict)
-        Figure and dictionary containing statistics
-    """
-    from scipy import stats as scipy_stats
-
-    # Filter to trials with valid data
-    valid_trials = []
-    for t in trials:
-        eye_x = t.get('eye_x', [])
-        if len(eye_x) < 2:  # Need at least 2 points for direction
-            continue
-        valid_trials.append(t)
-
-    n_trials = len(valid_trials)
-
-    print(f"\nLeft/Right Targeted Movement Analysis:")
-    print(f"  Trials with sufficient data: {n_trials}")
-
-    if n_trials < 5:
-        print("Warning: Not enough trials for left/right analysis")
-        return None, None
-
-    # Classify each trial
-    correct_direction = []
-    target_directions = []  # -1 for left, +1 for right
-    initial_directions = []  # -1 for left, +1 for right
-
-    for trial in valid_trials:
-        eye_x = trial['eye_x']
-        start_x = eye_x[0]
-        target_x = trial['target_x']
-
-        # Determine target direction
-        target_is_right = target_x > start_x
-        target_dir = 1 if target_is_right else -1
-        target_directions.append(target_dir)
-
-        # Determine initial movement direction (using first 10 points)
-        n_samples = min(10, len(eye_x))
-        end_x = eye_x[n_samples - 1]
-        initial_is_right = end_x > start_x
-        initial_dir = 1 if initial_is_right else -1
-        initial_directions.append(initial_dir)
-
-        # Check if they match
-        is_correct = (target_dir == initial_dir)
-        correct_direction.append(is_correct)
-
-    target_directions = np.array(target_directions)
-    initial_directions = np.array(initial_directions)
-    correct_direction = np.array(correct_direction)
-
-    # Calculate observed statistics
-    n_correct = correct_direction.sum()
-    proportion_correct = n_correct / n_trials
-    chance_level = 0.5
-
-    # Count left/right targets
-    n_left_targets = (target_directions == -1).sum()
-    n_right_targets = (target_directions == 1).sum()
-
-    print(f"  Left targets: {n_left_targets}")
-    print(f"  Right targets: {n_right_targets}")
-    print(f"  Correct initial directions: {n_correct}/{n_trials} ({proportion_correct*100:.1f}%)")
-
-    # Statistical test 1: Binomial test
-    # H0: proportion = 0.5 (chance)
-    # H1: proportion > 0.5 (better than chance)
-    binom_pvalue = scipy_stats.binomtest(n_correct, n_trials, 0.5, alternative='greater').pvalue
-
-    # Statistical test 2: Shuffle control
-    print(f"  Running {n_shuffles} shuffle iterations...")
-    np.random.seed(42)
-    shuffle_proportions = []
-
-    for i in range(n_shuffles):
-        # Randomly shuffle target directions
-        shuffled_targets = np.random.permutation(target_directions)
-        # Calculate proportion correct for shuffled data
-        shuffled_correct = (shuffled_targets == initial_directions).sum()
-        shuffle_proportions.append(shuffled_correct / n_trials)
-
-    shuffle_proportions = np.array(shuffle_proportions)
-    shuffle_pvalue = (shuffle_proportions >= proportion_correct).sum() / n_shuffles
-
-    # Create figure with 2x2 subplots
-    fig, axes = plt.subplots(2, 2, figsize=(14, 11))
-    fig.suptitle(f'Left/Right Targeted Movement Analysis - {animal_id} - {session_date}',
-                fontsize=14, fontweight='bold')
-
-    # Plot 1: Bar chart - Observed vs Chance
-    ax = axes[0, 0]
-    x_pos = [0, 1]
-    heights = [proportion_correct * 100, chance_level * 100]
-    colors = ['steelblue', 'lightcoral']
-    bars = ax.bar(x_pos, heights, width=0.6, color=colors, alpha=0.7, edgecolor='black')
-
-    ax.axhline(50, color='red', linestyle='--', linewidth=2, alpha=0.5, label='Chance (50%)')
-    ax.set_xticks(x_pos)
-    ax.set_xticklabels(['Observed', 'Chance\n(Random)'])
-    ax.set_ylabel('Correct Initial Direction (%)', fontsize=12)
-    ax.set_title('Observed vs Chance Performance', fontsize=12, fontweight='bold')
-    ax.set_ylim(0, 110)
-    ax.grid(True, alpha=0.3, axis='y')
-
-    # Add percentage labels on bars
-    for i, (bar, height) in enumerate(zip(bars, heights)):
-        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 2,
-               f'{height:.1f}%', ha='center', va='bottom', fontweight='bold', fontsize=12)
-
-    # Add sample size
-    ax.text(0, -5, f'n={n_trials}', ha='center', va='top', fontsize=10)
-
-    # Plot 2: Shuffle distribution
-    ax = axes[0, 1]
-    ax.hist(shuffle_proportions * 100, bins=30, color='lightcoral', alpha=0.7,
-           edgecolor='black', label='Shuffle null distribution')
-    ax.axvline(proportion_correct * 100, color='blue', linestyle='-', linewidth=3,
-              label=f'Observed = {proportion_correct*100:.1f}%')
-    ax.axvline(chance_level * 100, color='red', linestyle='--', linewidth=2,
-              label='Chance = 50%')
-
-    ax.set_xlabel('Correct Initial Direction (%)', fontsize=11)
-    ax.set_ylabel('Frequency', fontsize=11)
-    ax.set_title(f'Shuffle Test (n={n_shuffles} iterations)\np = {shuffle_pvalue:.4f}',
-                fontsize=12, fontweight='bold')
-    ax.legend(fontsize=9)
-    ax.grid(True, alpha=0.3, axis='y')
-
-    # Plot 3: Confusion matrix style
-    ax = axes[1, 0]
-
-    # Count each combination
-    left_target_left_initial = ((target_directions == -1) & (initial_directions == -1)).sum()
-    left_target_right_initial = ((target_directions == -1) & (initial_directions == 1)).sum()
-    right_target_left_initial = ((target_directions == 1) & (initial_directions == -1)).sum()
-    right_target_right_initial = ((target_directions == 1) & (initial_directions == 1)).sum()
-
-    confusion = np.array([[left_target_left_initial, left_target_right_initial],
-                         [right_target_left_initial, right_target_right_initial]])
-
-    im = ax.imshow(confusion, cmap='Blues', aspect='auto')
-
-    # Add text annotations
-    for i in range(2):
-        for j in range(2):
-            text = ax.text(j, i, str(confusion[i, j]),
-                         ha='center', va='center', color='black', fontsize=20, fontweight='bold')
-
-    ax.set_xticks([0, 1])
-    ax.set_yticks([0, 1])
-    ax.set_xticklabels(['Left', 'Right'], fontsize=11)
-    ax.set_yticklabels(['Left', 'Right'], fontsize=11)
-    ax.set_xlabel('Initial Movement Direction', fontsize=12)
-    ax.set_ylabel('Target Direction', fontsize=12)
-    ax.set_title('Confusion Matrix\n(diagonal = correct)', fontsize=12, fontweight='bold')
-
-    plt.colorbar(im, ax=ax, label='Count')
-
-    # Plot 4: Summary statistics table
-    ax = axes[1, 1]
-    ax.axis('off')
-
-    # Determine significance
-    is_voluntary = binom_pvalue < 0.05 and proportion_correct > 0.6
-
-    table_data = [
-        ['Metric', 'Value'],
-        ['', ''],
-        ['Sample Size', f'{n_trials} trials'],
-        ['Left Targets', f'{n_left_targets}'],
-        ['Right Targets', f'{n_right_targets}'],
-        ['', ''],
-        ['Observed Correct', f'{n_correct} ({proportion_correct*100:.1f}%)'],
-        ['Chance Level', f'{chance_level*100:.0f}%'],
-        ['Difference', f'+{(proportion_correct - chance_level)*100:.1f}%'],
-        ['', ''],
-        ['Binomial Test', f'p = {binom_pvalue:.4e}'],
-        ['Shuffle Test', f'p = {shuffle_pvalue:.4f}'],
-        ['', ''],
-        ['Interpretation', ''],
-        ['Better than 60%?', 'YES' if proportion_correct > 0.6 else 'NO'],
-        ['Significant (p<0.05)?', 'YES' if binom_pvalue < 0.05 else 'NO'],
-        ['', ''],
-        ['Conclusion', 'VOLUNTARY' if is_voluntary else 'UNCLEAR'],
-    ]
-
-    table = ax.table(cellText=table_data, cellLoc='left', loc='center',
-                    colWidths=[0.5, 0.5])
-    table.auto_set_font_size(False)
-    table.set_fontsize(10)
-    table.scale(1, 1.8)
-
-    # Style header and conclusion rows
-    table[(0, 0)].set_facecolor('#2196F3')
-    table[(0, 0)].set_text_props(weight='bold', color='white')
-    table[(0, 1)].set_facecolor('#2196F3')
-    table[(0, 1)].set_text_props(weight='bold', color='white')
-
-    # Color conclusion row
-    conclusion_row = 17
-    if is_voluntary:
-        table[(conclusion_row, 1)].set_facecolor('#4CAF50')
-        table[(conclusion_row, 1)].set_text_props(weight='bold', color='white', size=12)
-    else:
-        table[(conclusion_row, 1)].set_facecolor('#FFC107')
-        table[(conclusion_row, 1)].set_text_props(weight='bold', size=12)
-
-    plt.tight_layout()
-
-    # Save figure
-    if results_dir:
-        results_dir.mkdir(parents=True, exist_ok=True)
-        filename = f"{animal_id}_{session_date}_left_right_targeted_movement.png"
-        save_path = results_dir / filename
-        fig.savefig(save_path, dpi=150, bbox_inches='tight')
-        print(f"  Saved left/right targeted movement analysis to {save_path}")
-
-    # Compile statistics
-    stats_dict = {
-        'n_trials': n_trials,
-        'n_left_targets': int(n_left_targets),
-        'n_right_targets': int(n_right_targets),
-        'n_correct': int(n_correct),
-        'proportion_correct': proportion_correct,
-        'chance_level': chance_level,
-        'binomial_pvalue': binom_pvalue,
-        'shuffle_pvalue': shuffle_pvalue,
-        'shuffle_mean': np.mean(shuffle_proportions),
-        'shuffle_std': np.std(shuffle_proportions),
-        'is_voluntary': is_voluntary,
-    }
-
-    # Print summary
-    print(f"\n  Observed: {n_correct}/{n_trials} correct ({proportion_correct*100:.1f}%)")
-    print(f"  Chance: {chance_level*100:.0f}%")
-    print(f"  Improvement: +{(proportion_correct - chance_level)*100:.1f}%")
-    print(f"\n  Binomial test: p = {binom_pvalue:.4e}")
-    print(f"  Shuffle test: p = {shuffle_pvalue:.4f}")
-    print(f"  Shuffle mean: {np.mean(shuffle_proportions)*100:.1f}% (±{np.std(shuffle_proportions)*100:.1f}%)")
-
-    if is_voluntary:
-        print(f"\n  *** CONCLUSION: Strong evidence for VOLUNTARY LEFT/RIGHT targeting ***")
-        print(f"      - Proportion correct ({proportion_correct*100:.1f}%) >> chance (50%)")
-        print(f"      - Highly significant (p < 0.05)")
-    elif binom_pvalue < 0.05:
-        print(f"\n  *** CONCLUSION: Evidence for targeted movements (p < 0.05) ***")
-    else:
-        print(f"\n  *** CONCLUSION: Insufficient evidence for voluntary movements ***")
-
-    return fig, stats_dict
+    return output_df
 
 
 def test_initial_direction_correlation(trials: list[dict], results_dir: Optional[Path] = None,
@@ -5949,19 +4481,6 @@ def analyze_folder(folder_path: str | Path, results_dir: Optional[str | Path] = 
         print("No valid trials found, exiting")
         return pd.DataFrame()
 
-    # Generate plots
-    print("\nGenerating trajectory plot...")
-    fig_traj = plot_trajectories(trials_for_analysis, results_dir, animal_id, date_str)
-    if show_plots:
-        plt.show()
-    plt.close(fig_traj)
-
-    print("\nGenerating trajectory plot by direction (left vs right)...")
-    fig_traj_dir = plot_trajectories_by_direction(trials_for_analysis, results_dir, animal_id, date_str)
-    if show_plots:
-        plt.show()
-    plt.close(fig_traj_dir)
-
     # Interactive viewer: show all trials or just successful ones
     print("\nShowing interactive trajectory viewer...")
     if show_failed_in_viewer:
@@ -6021,26 +4540,6 @@ def analyze_folder(folder_path: str | Path, results_dir: Optional[str | Path] = 
             plt.show()
         plt.close(fig_vis_detailed)
 
-    # NEW: Test for voluntary targeted movement
-    print("\nTesting for voluntary targeted movement...")
-    fig_voluntary, voluntary_stats = test_voluntary_targeted_movement(trials_for_analysis, results_dir=results_dir,
-                                                                       animal_id=animal_id,
-                                                                       session_date=date_str)
-    if fig_voluntary is not None:
-        if show_plots:
-            plt.show()
-        plt.close(fig_voluntary)
-
-    # NEW: Test for left/right targeted movement (simplified binary test)
-    print("\nTesting for left/right targeted movement (binary classification)...")
-    fig_lr_test, lr_test_stats = test_left_right_targeted_movement(trials_for_analysis, results_dir=results_dir,
-                                                                    animal_id=animal_id,
-                                                                    session_date=date_str)
-    if fig_lr_test is not None:
-        if show_plots:
-            plt.show()
-        plt.close(fig_lr_test)
-
     # NEW: Interactive initial direction viewer
     print("\nShowing interactive initial direction viewer...")
     print("  (Shows initial direction vectors for each trial - press SPACE to advance)")
@@ -6053,32 +4552,26 @@ def analyze_folder(folder_path: str | Path, results_dir: Optional[str | Path] = 
     if show_plots:
         interactive_fixation_viewer(trials_for_analysis, animal_id=animal_id, session_date=date_str)
 
-    # NEW: Fixation targeting analysis
-    print("\nGenerating fixation targeting analysis...")
-    fig_fixation_targeting = plot_fixation_targeting_analysis(trials_for_analysis, results_dir=results_dir,
-                                                               animal_id=animal_id,
-                                                               session_date=date_str)
-    if show_plots:
-        plt.show()
-    plt.close(fig_fixation_targeting)
-
-    # NEW: Save detailed fixation data
-    print("\nSaving detailed fixation data...")
-    detailed_fixation_df = save_detailed_fixation_data(trials_for_analysis, results_dir=results_dir,
-                                                        animal_id=animal_id,
-                                                        session_date=date_str)
-
-    # NEW: Create vstim_go_fixation CSV for debugging
-    print("\nCreating vstim_go_fixation CSV for debugging...")
+    # NEW: Create vstim_go_fixation CSV (single source of truth for fixation detection)
+    print("\nCreating vstim_go_fixation CSV...")
     vstim_go_fixation_df = create_vstim_go_fixation_csv(folder_path, results_dir=results_dir,
                                                          animal_id=animal_id,
                                                          session_date=date_str)
 
-    # NEW: Compare with task's real-time fixation detection
-    comparison_df = compare_fixation_detection(folder_path, vstim_go_fixation_df=vstim_go_fixation_df,
-                                                results_dir=results_dir,
-                                                animal_id=animal_id,
-                                                session_date=date_str)
+    # NEW: Save detailed fixation data (uses vstim_go_fixation_df for consistency)
+    print("\nSaving detailed fixation data...")
+    detailed_fixation_df = save_detailed_fixation_data(trials_for_analysis, results_dir=results_dir,
+                                                        animal_id=animal_id,
+                                                        session_date=date_str,
+                                                        vstim_go_fixation_df=vstim_go_fixation_df)
+
+    # NEW: Frame-by-frame comparison with agreement column
+    fixlog_with_agreement = compare_fixations_frame_by_frame(
+        folder_path, vstim_go_fixation_df=vstim_go_fixation_df,
+        results_dir=results_dir,
+        animal_id=animal_id,
+        session_date=date_str
+    )
 
     print("\nPlotting final positions by target type...")
     fig_final_pos = plot_final_positions_by_target(trials_for_analysis, min_duration=trial_min_duration, max_duration=trial_max_duration,
