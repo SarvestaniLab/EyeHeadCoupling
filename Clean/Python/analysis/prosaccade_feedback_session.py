@@ -14,6 +14,7 @@ The script produces:
 from __future__ import annotations
 
 import sys
+import csv
 import argparse
 from pathlib import Path
 from typing import Tuple, Optional
@@ -80,7 +81,7 @@ def load_feedback_data(folder_path: Path, animal_id: str = "Tsh001") -> Tuple[pd
             eot_arr = eot_arr.reshape(1, -1)
 
         n_cols = eot_arr.shape[1]
-        print(f"  Detected {n_cols} columns in endoftrial file")
+     
 
         # Handle different column formats
         # Third column (index 2) is always trial_success (2=success, 1=failed)
@@ -206,14 +207,10 @@ def load_feedback_data(folder_path: Path, animal_id: str = "Tsh001") -> Tuple[pd
     except Exception as e:
         raise ValueError(f"Error loading vstim_cue file {vstim_cue_file}: {e}")
 
-    print(f"\nData loaded successfully!")
-    print(f"  Frame range: {eye_df['frame'].min()} to {eye_df['frame'].max()}")
-    print(f"  Timestamp range: {eot_df['timestamp'].min():.2f} to {eot_df['timestamp'].max():.2f}")
-    print(f"  First target at frame {target_df.iloc[0]['frame']}: ({target_df.iloc[0]['target_x']:.1f}, {target_df.iloc[0]['target_y']:.1f})")
-    print(f"  First trial ends at frame {eot_df.iloc[0]['frame']}, timestamp {eot_df.iloc[0]['timestamp']:.2f}")
+
     if len(eot_df) > 1:
         duration_example = eot_df.iloc[1]['timestamp'] - eot_df.iloc[0]['timestamp']
-        print(f"  Example: Trial 1 to Trial 2 timestamp diff = {duration_example:.2f} (should be in seconds)")
+
 
     return eot_df, eye_df, target_df
 
@@ -262,9 +259,6 @@ def identify_and_filter_failed_trials(target_df: pd.DataFrame, eot_df: pd.DataFr
         # eot_df should have one entry per trial (including failed ones)
         trial_success_flags = eot_df['trial_success'].values
 
-        # Debug: Show first few trial_success values
-        print(f"\n  DEBUG: First 10 trial_success values: {trial_success_flags[:10]}")
-        print(f"  DEBUG: target_df length: {len(target_df)}, eot_df length: {len(eot_df)}")
 
         # Identify successful and failed indices
         successful_indices = []
@@ -452,13 +446,6 @@ def extract_trial_trajectories(eot_df: pd.DataFrame, eye_df: pd.DataFrame,
                 final_eye_y = eye_trajectory['green_y'].values[-1]
                 final_eye_frame = int(eye_trajectory['frame'].values[-1])
 
-            # Debug: Check alignment
-            if i < 3:  # Only print for first 3 trials
-                print(f"\n  Trial {trial_num} final position calculation (OPTION 2: next row after trial):")
-                print(f"    end_frame from endoftrial: {end_frame}")
-                print(f"    last vstim_go frame within trial: {last_within_trial_frame}")
-                print(f"    final_eye_frame (next row in vstim_go): {final_eye_frame}")
-                print(f"    final position from vstim_go: ({final_eye_x:.3f}, {final_eye_y:.3f})")
 
             # Append the final position to trajectory arrays for continuous plotting
             # This ensures no gap/jump between trajectory and final position marker
@@ -928,8 +915,351 @@ def plot_time_to_target(trials: list[dict], results_dir: Optional[Path] = None,
     return fig
 
 
+def detect_fixations(eye_x: np.ndarray, eye_y: np.ndarray, eye_times: np.ndarray,
+                     min_fixation_duration: float = 0.65,
+                     max_movement: float = 0.1) -> list[tuple]:
+    """Detect fixation windows based on frame-to-frame movement velocity.
+
+    A fixation is a period where consecutive frame-to-frame movements are below
+    the max_movement threshold and the total duration meets the minimum.
+
+    Parameters
+    ----------
+    eye_x : np.ndarray
+        X positions of eye trajectory
+    eye_y : np.ndarray
+        Y positions of eye trajectory
+    eye_times : np.ndarray
+        Timestamps for each position
+    min_fixation_duration : float
+        Minimum duration (seconds) for a valid fixation (default: 0.65)
+    max_movement : float
+        Maximum frame-to-frame movement for fixation (default: 0.1 units)
+
+    Returns
+    -------
+    list of tuples
+        Each tuple is (start_idx, end_idx, duration, span) where:
+        - start_idx: Starting index in the arrays
+        - end_idx: Ending index (exclusive)
+        - duration: Total time from start to end
+        - span: Spatial extent of the fixation
+    """
+    if len(eye_x) < 2:
+        return []
+
+    n = len(eye_x)
+    fixations = []
+    i = 0
+
+    while i < n:
+        # Try to extend a fixation starting at point i
+        j = i + 1
+
+        # Extend while frame-to-frame movement is below threshold
+        while j < n:
+            # Calculate movement from point j-1 to point j
+            dx = eye_x[j] - eye_x[j-1]
+            dy = eye_y[j] - eye_y[j-1]
+            movement = np.sqrt(dx**2 + dy**2)
+
+            if movement < max_movement:
+                j += 1  # Include point j in the fixation
+            else:
+                break  # Movement too large, stop before point j
+
+        # Now we have a potential fixation from index i to j (exclusive end)
+        # This includes points [i, i+1, ..., j-1]
+
+        if j > i + 1:  # At least 2 points
+            duration = eye_times[j-1] - eye_times[i]
+            if duration >= min_fixation_duration:
+                # Valid fixation! Calculate span for informational purposes
+                fix_x = eye_x[i:j]
+                fix_y = eye_y[i:j]
+                x_range = np.max(fix_x) - np.min(fix_x)
+                y_range = np.max(fix_y) - np.min(fix_y)
+                span = np.sqrt(x_range**2 + y_range**2)
+                fixations.append((i, j, duration, span))
+                i = j  # Start next search after this fixation
+            else:
+                i += 1  # Duration too short, try next starting point
+        else:
+            i += 1  # No valid extension, try next starting point
+
+    return fixations
+
+
+def calculate_trial_success_from_fixations(eye_x: np.ndarray, eye_y: np.ndarray,
+                                          eye_times: np.ndarray,
+                                          target_x: float, target_y: float,
+                                          contact_threshold: float,
+                                          min_fixation_duration: float = 0.65,
+                                          max_movement: float = 0.1) -> tuple[bool, float]:
+    """Determine trial success based on the last fixation.
+
+    Success criterion:
+    - Detect fixations using frame-to-frame movement threshold
+    - Use ONLY the LAST fixation (since each trial should have only one fixation)
+    - Check if this last fixation ENDS on target (last point within contact_threshold)
+    - Success if the last fixation ends on target and duration >= min_fixation_duration
+
+    NOTE: In prosaccade trials, there should ideally be only one fixation:
+    - A fixation inside the target should end the trial with success
+    - A fixation outside the target should end the trial with failure
+    - If multiple fixations are detected, we use only the last one
+
+    Parameters
+    ----------
+    eye_x, eye_y, eye_times : np.ndarray
+        Eye trajectory data
+    target_x, target_y : float
+        Target position
+    contact_threshold : float
+        Distance threshold for being "on target" (target_radius + cursor_radius)
+    min_fixation_duration : float
+        Minimum fixation duration for success (default: 0.65s)
+    max_movement : float
+        Maximum movement for fixation detection (default: 0.1 units)
+
+    Returns
+    -------
+    tuple of (success, fixation_duration)
+        success : bool
+            Whether trial succeeded
+        fixation_duration : float
+            Duration of last fixation if it ends on target (0.0 if none or off-target)
+    """
+    # Detect all fixations
+    fixations = detect_fixations(eye_x, eye_y, eye_times,
+                                 min_fixation_duration, max_movement)
+
+    # Use only the LAST fixation
+    if len(fixations) == 0:
+        return False, 0.0
+
+    # Get the last fixation
+    start_idx, end_idx, duration, span = fixations[-1]
+
+    # Check if the last fixation ends on target
+    final_x = eye_x[end_idx - 1]
+    final_y = eye_y[end_idx - 1]
+    dist = np.sqrt((final_x - target_x)**2 + (final_y - target_y)**2)
+
+    if dist <= contact_threshold:
+        # Last fixation ends on target, success if duration meets requirement
+        success = (duration >= min_fixation_duration)
+        return success, duration
+    else:
+        # Last fixation does not end on target
+        return False, 0.0
+
+
+def calculate_chance_level(trials: list[dict], n_shuffles: int = 10000,
+                           target_filter: Optional[callable] = None,
+                           min_fixation_duration: float = 0.65,
+                           max_movement: float = 0.1,
+                           results_dir: Optional[Path] = None) -> float:
+    """Calculate chance level success rate by shuffling target positions.
+
+    Shuffles target positions randomly across trials and calculates what the
+    success rate would be if targets were at those shuffled positions, using
+    the actual fixation-based success criterion.
+
+    For subset analysis (e.g., left targets only):
+    - Filters trials to get specific eye trajectories (e.g., from left-target trials)
+    - But shuffles among ALL target positions from the full dataset
+    - This asks: "For these specific trials, what if targets were randomly placed anywhere?"
+
+    Success criterion (same as actual trials):
+    - Detects fixations when frame-to-frame movement < max_movement
+    - A fixation counts if it ENDS on the shuffled target
+    - Success if any fixation ending on target has duration >= min_fixation_duration
+
+    Parameters
+    ----------
+    trials : list of dict
+        List of trial data dictionaries with eye trajectory and target information
+    n_shuffles : int
+        Number of random shuffles to perform (default: 10000)
+    target_filter : callable, optional
+        Optional function to filter which trials' eye trajectories to use.
+        Note: Shuffles among ALL target positions regardless of filter.
+    min_fixation_duration : float
+        Minimum fixation duration required for success (default: 0.65 seconds)
+    max_movement : float
+        Maximum frame-to-frame movement for fixation detection (default: 0.1 units)
+
+    Returns
+    -------
+    float
+        Average success rate across all shuffles (as fraction, not percentage)
+    """
+    if not trials or len(trials) == 0:
+        return 0.0
+
+    # IMPORTANT: Extract ALL target positions BEFORE filtering
+    # This ensures we shuffle among all possible positions, not just the filtered subset
+    all_target_positions = np.array([(t['target_x'], t['target_y']) for t in trials])
+    all_target_diameters = np.array([t['target_diameter'] for t in trials])
+    all_cursor_diameters = np.array([t.get('cursor_diameter', 0.2) for t in trials])
+
+    # Remove any duplicate positions and their associated sizes for shuffling pool
+    # (we only need unique positions to shuffle from)
+    unique_positions = []
+    unique_diameters = []
+    unique_cursor_diams = []
+    seen = set()
+    for i, (tx, ty) in enumerate(all_target_positions):
+        key = (round(tx, 3), round(ty, 3))
+        if key not in seen:
+            seen.add(key)
+            unique_positions.append((tx, ty))
+            unique_diameters.append(all_target_diameters[i])
+            unique_cursor_diams.append(all_cursor_diameters[i])
+
+    shuffle_pool_positions = np.array(unique_positions)
+    shuffle_pool_diameters = np.array(unique_diameters)
+    n_unique_positions = len(shuffle_pool_positions)
+
+    # NOW apply filter to get specific trials (eye trajectories) to test
+    filtered_trials = trials
+    if target_filter is not None:
+        filtered_trials = [t for t in trials if target_filter(t)]
+
+    if len(filtered_trials) == 0:
+        return 0.0
+
+    # Filter out trials without eye data
+    valid_trials = []
+    for trial in filtered_trials:
+        if trial.get('has_eye_data', False):
+            eye_x = np.array(trial.get('eye_x', []))
+            eye_y = np.array(trial.get('eye_y', []))
+            eye_times = np.array(trial.get('eye_times', []))
+            cursor_diam = trial.get('cursor_diameter', 0.2)
+            if len(eye_x) > 0 and len(eye_times) > 0:
+                valid_trials.append({
+                    'eye_x': eye_x,
+                    'eye_y': eye_y,
+                    'eye_times': eye_times,
+                    'cursor_diameter': cursor_diam,
+                    'target_x': trial['target_x'],
+                    'target_y': trial['target_y'],
+                    'target_diameter': trial['target_diameter']
+                })
+
+    if len(valid_trials) == 0:
+        return 0.0
+
+    n_valid = len(valid_trials)
+    success_rates = []
+
+    # Only write CSV for all trials (no filter applied)
+    write_csv = (target_filter is None and results_dir is not None)
+    csv_writer = None
+    csvfile = None
+
+    if write_csv:
+        csv_path = results_dir / 'chance_level_trials.csv'
+        csvfile = open(csv_path, 'w', newline='')
+        csv_writer = csv.writer(csvfile)
+        csv_writer.writerow(['trial_number', 'fixation_ended_on', 'actual_target', 'shuffled_target'])
+
+    for shuffle_idx in range(n_shuffles):
+        # Shuffle among ALL unique target positions, not just filtered ones
+        # Sample WITH replacement to match number of trials
+        random_indices = np.random.choice(n_unique_positions, size=n_valid, replace=True)
+        shuffled_targets = shuffle_pool_positions[random_indices]
+
+        # Calculate success for this shuffle by comparing target positions
+        n_success = 0
+        for i in range(n_valid):
+            # Get actual and shuffled target positions
+            actual_target_x = valid_trials[i]['target_x']
+            actual_target_y = valid_trials[i]['target_y']
+            shuffled_x, shuffled_y = shuffled_targets[i]
+
+            # Determine sides
+            actual_target_side = 'left' if actual_target_x < 0 else 'right'
+            shuffled_target_side = 'left' if shuffled_x < 0 else 'right'
+
+            # Success if shuffled target matches actual target position
+            if actual_target_side == shuffled_target_side:
+                n_success += 1
+
+            # Only write to CSV for the first shuffle and when enabled
+            if write_csv and shuffle_idx == 0:
+                eye_x = valid_trials[i]['eye_x']
+                eye_y = valid_trials[i]['eye_y']
+                eye_times = valid_trials[i]['eye_times']
+                cursor_radius = valid_trials[i]['cursor_diameter'] / 2.0
+
+                # Determine where the last fixation ended by detecting fixations
+                fixations = detect_fixations(eye_x, eye_y, eye_times,
+                                            min_fixation_duration, max_movement)
+
+                if len(fixations) > 0:
+                    # Get the last fixation's ending position
+                    start_idx, end_idx, duration, span = fixations[-1]
+                    final_x = eye_x[end_idx - 1]
+                    final_y = eye_y[end_idx - 1]
+
+                    # Check which target the last fixation ended on
+                    # Find all left and right target positions from shuffle pool
+                    left_targets = [(tx, ty, shuffle_pool_diameters[idx])
+                                   for idx, (tx, ty) in enumerate(shuffle_pool_positions) if tx < 0]
+                    right_targets = [(tx, ty, shuffle_pool_diameters[idx])
+                                    for idx, (tx, ty) in enumerate(shuffle_pool_positions) if tx >= 0]
+
+                    # Check if fixation ended on left target
+                    on_left = False
+                    if left_targets:
+                        left_x, left_y, left_diam = left_targets[0]
+                        left_dist = np.sqrt((final_x - left_x)**2 + (final_y - left_y)**2)
+                        left_threshold = (left_diam / 2.0) + cursor_radius
+                        on_left = (left_dist <= left_threshold)
+
+                    # Check if fixation ended on right target
+                    on_right = False
+                    if right_targets:
+                        right_x, right_y, right_diam = right_targets[0]
+                        right_dist = np.sqrt((final_x - right_x)**2 + (final_y - right_y)**2)
+                        right_threshold = (right_diam / 2.0) + cursor_radius
+                        on_right = (right_dist <= right_threshold)
+
+                    # Determine which side the fixation ended on
+                    if on_left and not on_right:
+                        fixation_side = 'left'
+                    elif on_right and not on_left:
+                        fixation_side = 'right'
+                    elif on_left and on_right:
+                        # If on both (shouldn't happen), use closest
+                        fixation_side = 'left' if left_dist < right_dist else 'right'
+                    else:
+                        # Not on either target, use position
+                        fixation_side = 'left' if final_x < 0 else 'right'
+                else:
+                    # No fixations detected, use last position
+                    fixation_side = 'left' if eye_x[-1] < 0 else 'right'
+
+                # Write trial data
+                csv_writer.writerow([i + 1, fixation_side, actual_target_side, shuffled_target_side])
+
+        # Calculate success rate for this shuffle
+        success_rate = n_success / n_valid if n_valid > 0 else 0.0
+        success_rates.append(success_rate)
+
+    if csvfile:
+        csvfile.close()
+
+    # Return average success rate across all shuffles
+    return np.mean(success_rates)
+
+
 def plot_trial_success(eot_df: pd.DataFrame, results_dir: Optional[Path] = None,
-                       animal_id: Optional[str] = None, session_date: str = "") -> plt.Figure:
+                       animal_id: Optional[str] = None, session_date: str = "",
+                       trials: Optional[list[dict]] = None) -> plt.Figure:
     """Plot trial success vs failure summary, independent of --include-failed-trials flag.
 
     Creates a figure with:
@@ -969,23 +1299,41 @@ def plot_trial_success(eot_df: pd.DataFrame, results_dir: Optional[Path] = None,
     pct_success = 100 * n_success / n_trials if n_trials > 0 else 0
     pct_failed = 100 * n_failed / n_trials if n_trials > 0 else 0
 
+    # Calculate chance level if trials data is provided
+    chance_level = None
+    if trials is not None and len(trials) > 0:
+        print("  Calculating chance level (1000 shuffles)...")
+        chance_level = calculate_chance_level(trials, n_shuffles=1000, results_dir=results_dir)
+        print(f"  Chance level: {100*chance_level:.1f}%")
+
     # Create figure with 2 subplots
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), height_ratios=[1, 1.5])
 
     # --- Top plot: Bar chart showing fraction of success vs failure ---
-    categories = ['Success', 'Failed']
-    counts = [n_success, n_failed]
-    percentages = [pct_success, pct_failed]
-    colors = ['forestgreen', 'firebrick']
+    if chance_level is not None:
+        categories = ['Success', 'Failed', 'Chance']
+        counts = [n_success, n_failed, chance_level * n_trials]
+        percentages = [pct_success, pct_failed, 100 * chance_level]
+        colors = ['forestgreen', 'firebrick', 'gray']
+    else:
+        categories = ['Success', 'Failed']
+        counts = [n_success, n_failed]
+        percentages = [pct_success, pct_failed]
+        colors = ['forestgreen', 'firebrick']
 
     bars = ax1.bar(categories, counts, color=colors, edgecolor='black', linewidth=1.5)
 
     # Add count and percentage labels on bars
     for bar, count, pct in zip(bars, counts, percentages):
         height = bar.get_height()
-        ax1.text(bar.get_x() + bar.get_width()/2., height,
-                f'{count}\n({pct:.1f}%)',
-                ha='center', va='bottom', fontsize=12, fontweight='bold')
+        if chance_level is not None and bar == bars[-1]:  # Chance bar
+            ax1.text(bar.get_x() + bar.get_width()/2., height,
+                    f'{pct:.1f}%',
+                    ha='center', va='bottom', fontsize=12, fontweight='bold')
+        else:
+            ax1.text(bar.get_x() + bar.get_width()/2., height,
+                    f'{int(count)}\n({pct:.1f}%)',
+                    ha='center', va='bottom', fontsize=12, fontweight='bold')
 
     ax1.set_ylabel('Number of Trials', fontsize=12)
     title = 'Trial Success Rate (All Trials)'
@@ -1025,9 +1373,11 @@ def plot_trial_success(eot_df: pd.DataFrame, results_dir: Optional[Path] = None,
     running_success = np.cumsum(is_success) / trial_numbers * 100
     ax2_twin.plot(trial_numbers, running_success, 'b-', linewidth=2, alpha=0.7,
                   label='Running success rate')
+
     ax2_twin.set_ylabel('Running Success Rate (%)', fontsize=11, color='blue')
     ax2_twin.tick_params(axis='y', labelcolor='blue')
     ax2_twin.set_ylim(0, 105)
+    ax2_twin.legend(loc='upper right', fontsize=9)
 
     ax2.set_xlabel('Trial Number', fontsize=12)
     ax2.set_ylabel('Trial Outcome', fontsize=12)
@@ -1269,96 +1619,6 @@ def plot_final_positions_by_target(trials: list[dict], min_duration: float = 0.0
     return fig
 
 
-def analyze_starting_position_bias_DEPRECATED(trials: list[dict], min_duration: float = 0.01, max_duration: float = 10.0,
-                                   time_window: tuple = (0.0, 0.1),
-                                   results_dir: Optional[Path] = None, animal_id: Optional[str] = None,
-                                   session_date: str = "") -> tuple:
-    """DEPRECATED: Use plot_final_positions_by_target() instead.
-
-    Analyze if average eye position during early trial period differs between left and right targets.
-
-    Filters trials by duration (exclude < 0.1s) and compares average eye position
-    during the specified time window.
-
-    Parameters
-    ----------
-    trials : list of dict
-        List of trial data dictionaries
-    min_duration : float
-        Minimum trial duration in seconds (default: 0.1)
-    max_duration : float
-        Maximum trial duration in seconds (default: 10.0)
-    time_window : tuple
-        Time window (start, end) in seconds for averaging position (default: first 0.1s)
-    results_dir : Path, optional
-        Directory to save the figure
-    animal_id : str, optional
-        Animal identifier for filename
-    session_date : str, optional
-        Session date for title
-
-    Returns
-    -------
-    tuple of (fig, stats_dict)
-        Figure and dictionary containing statistics
-    """
-    from scipy import stats as scipy_stats
-
-    # Filter trials by duration
-    filtered_trials = [t for t in trials if min_duration <= t['duration'] <= max_duration]
-    n_excluded = len(trials) - len(filtered_trials)
-
-    window_start, window_end = time_window
-
-    print(f"\nStarting Position Bias Analysis (avg {window_start}-{window_end}s):")
-    print(f"  Total trials: {len(trials)}")
-    print(f"  Excluded trials (duration < {min_duration}s or > {max_duration}s): {n_excluded}")
-    print(f"  Trials included in analysis: {len(filtered_trials)}")
-
-    if len(filtered_trials) == 0:
-        print("  Warning: No trials left after filtering!")
-        return None, None
-
-    # Group trials by unique target positions (round to 2 decimal places)
-    from collections import defaultdict
-    position_groups = defaultdict(list)
-    for t in filtered_trials:
-        pos_key = (round(t['target_x'], 2), round(t['target_y'], 2))
-        position_groups[pos_key].append(t)
-
-    # Sort positions by x coordinate, then y coordinate
-    sorted_positions = sorted(position_groups.keys(), key=lambda p: (p[0], p[1]))
-
-    print(f"  Detected {len(sorted_positions)} unique target positions:")
-    for pos in sorted_positions:
-        n_trials = len(position_groups[pos])
-        print(f"    Position ({pos[0]:+.2f}, {pos[1]:+.2f}): {n_trials} trials")
-
-    if len(sorted_positions) < 2:
-        print("  Warning: Need at least 2 different target positions for comparison!")
-        return None, None
-
-    # For backward compatibility: if exactly 2 positions, classify as left/right
-    # Otherwise, compare first position vs all others
-    if len(sorted_positions) == 2:
-        left_trials = position_groups[sorted_positions[0]]
-        right_trials = position_groups[sorted_positions[1]]
-        print(f"  Position 1 trials: {len(left_trials)}")
-        print(f"  Position 2 trials: {len(right_trials)}")
-    else:
-        # For multiple positions: compare each position separately
-        # We'll use "left" for first position, "right" for concatenated rest
-        left_trials = position_groups[sorted_positions[0]]
-        right_trials = []
-        for pos in sorted_positions[1:]:
-            right_trials.extend(position_groups[pos])
-        print(f"  Position 1 (reference) trials: {len(left_trials)}")
-        print(f"  Other positions (combined) trials: {len(right_trials)}")
-
-    if len(left_trials) == 0 or len(right_trials) == 0:
-        print("  Warning: Need trials at multiple positions for comparison!")
-        return None, None
-
     # Calculate average position during time window for each trial
     def get_avg_position_in_window(trial, window_start, window_end):
         """Calculate average eye position during specified time window."""
@@ -1568,311 +1828,6 @@ def analyze_starting_position_bias_DEPRECATED(trials: list[dict], min_duration: 
     return fig, stats_dict
 
 
-def analyze_ending_position_bias_DEPRECATED(trials: list[dict], min_duration: float = 0.01, max_duration: float = 10.0,
-                                  time_window_before_end: tuple = (0.2, 0.0),
-                                  results_dir: Optional[Path] = None, animal_id: Optional[str] = None,
-                                  session_date: str = "") -> tuple:
-    """DEPRECATED: Use plot_final_positions_by_target() instead.
-
-    Analyze if final eye position differs between left and right targets.
-
-    Filters trials by duration (0.1s to 10s) and compares final eye position
-    (last sample in trajectory) between left and right target trials.
-
-    Parameters
-    ----------
-    trials : list of dict
-        List of trial data dictionaries
-    min_duration : float
-        Minimum trial duration in seconds (default: 0.1)
-    max_duration : float
-        Maximum trial duration in seconds (default: 10.0)
-    time_window_before_end : tuple
-        Unused parameter (kept for backward compatibility)
-    results_dir : Path, optional
-        Directory to save the figure
-    animal_id : str, optional
-        Animal identifier for filename
-    session_date : str, optional
-        Session date for title
-
-    Returns
-    -------
-    tuple of (fig, stats_dict)
-        Figure and dictionary containing statistics
-    """
-    from scipy import stats as scipy_stats
-
-    # Filter trials by duration
-    filtered_trials = [t for t in trials if min_duration <= t['duration'] <= max_duration]
-    n_excluded = len(trials) - len(filtered_trials)
-
-    # Extract time window parameters
-    max_before_end, min_before_end = time_window_before_end
-    window_duration = max_before_end - min_before_end
-
-    print(f"\nFinal Position Bias Analysis (avg last {window_duration}s):")
-    print(f"  Total trials: {len(trials)}")
-    print(f"  Excluded trials (duration < {min_duration}s or > {max_duration}s): {n_excluded}")
-    print(f"  Trials included in analysis: {len(filtered_trials)}")
-
-    if len(filtered_trials) == 0:
-        print("  Warning: No trials left after filtering!")
-        return None, None
-
-    # Group trials by unique target positions (round to 2 decimal places)
-    from collections import defaultdict
-    position_groups = defaultdict(list)
-    for t in filtered_trials:
-        pos_key = (round(t['target_x'], 2), round(t['target_y'], 2))
-        position_groups[pos_key].append(t)
-
-    # Sort positions by x coordinate, then y coordinate
-    sorted_positions = sorted(position_groups.keys(), key=lambda p: (p[0], p[1]))
-
-    print(f"  Detected {len(sorted_positions)} unique target positions:")
-    for pos in sorted_positions:
-        n_trials = len(position_groups[pos])
-        print(f"    Position ({pos[0]:+.2f}, {pos[1]:+.2f}): {n_trials} trials")
-
-    if len(sorted_positions) < 2:
-        print("  Warning: Need at least 2 different target positions for comparison!")
-        return None, None
-
-    # For backward compatibility: if exactly 2 positions, classify as separate groups
-    # Otherwise, compare first position vs all others
-    if len(sorted_positions) == 2:
-        left_trials = position_groups[sorted_positions[0]]
-        right_trials = position_groups[sorted_positions[1]]
-        print(f"  Position 1 trials: {len(left_trials)}")
-        print(f"  Position 2 trials: {len(right_trials)}")
-    else:
-        # For multiple positions: compare each position separately
-        left_trials = position_groups[sorted_positions[0]]
-        right_trials = []
-        for pos in sorted_positions[1:]:
-            right_trials.extend(position_groups[pos])
-        print(f"  Position 1 (reference) trials: {len(left_trials)}")
-        print(f"  Other positions (combined) trials: {len(right_trials)}")
-
-    if len(left_trials) == 0 or len(right_trials) == 0:
-        print("  Warning: Need trials at multiple positions for comparison!")
-        return None, None
-
-    # Calculate average position during ending time window for each trial
-    def get_avg_position_before_end(trial, max_before_end, min_before_end):
-        """Calculate average eye position during specified time window before trial end."""
-        # Use eye trajectory's own timestamps for consistency
-        trial_times = trial['eye_times'] - trial['eye_start_time']  # Relative to eye trajectory start
-        trial_duration = trial['duration']
-
-        # Time window: [duration - max_before_end, duration - min_before_end]
-        window_start = trial_duration - max_before_end
-        window_end = trial_duration - min_before_end
-
-        mask = (trial_times >= window_start) & (trial_times <= window_end)
-
-        if np.sum(mask) == 0:
-            # No data in window, return NaN
-            return np.nan, np.nan
-
-        avg_x = np.mean(trial['eye_x'][mask])
-        avg_y = np.mean(trial['eye_y'][mask])
-        return avg_x, avg_y
-
-    # Extract average positions for left trials
-    left_positions = [get_avg_position_before_end(t, max_before_end, min_before_end) for t in left_trials]
-    left_final_x = np.array([pos[0] for pos in left_positions])
-    left_final_y = np.array([pos[1] for pos in left_positions])
-
-    # Remove trials with NaN (not enough data in window)
-    valid_left = ~(np.isnan(left_final_x) | np.isnan(left_final_y))
-    left_final_x = left_final_x[valid_left]
-    left_final_y = left_final_y[valid_left]
-    n_valid_left = len(left_final_x)
-
-    # Extract average positions for right trials
-    right_positions = [get_avg_position_before_end(t, max_before_end, min_before_end) for t in right_trials]
-    right_final_x = np.array([pos[0] for pos in right_positions])
-    right_final_y = np.array([pos[1] for pos in right_positions])
-
-    # Remove trials with NaN
-    valid_right = ~(np.isnan(right_final_x) | np.isnan(right_final_y))
-    right_final_x = right_final_x[valid_right]
-    right_final_y = right_final_y[valid_right]
-    n_valid_right = len(right_final_x)
-
-    print(f"  Left target trials with valid data in ending window: {n_valid_left}/{len(left_trials)}")
-    print(f"  Right target trials with valid data in ending window: {n_valid_right}/{len(right_trials)}")
-
-    if n_valid_left == 0 or n_valid_right == 0:
-        print("  Warning: Not enough trials with valid final positions!")
-        return None, None
-
-    # Statistical tests (Mann-Whitney U test, non-parametric)
-    stat_x, p_x = scipy_stats.mannwhitneyu(left_final_x, right_final_x, alternative='two-sided')
-    stat_y, p_y = scipy_stats.mannwhitneyu(left_final_y, right_final_y, alternative='two-sided')
-
-    # Calculate summary statistics
-    stats_dict = {
-        'left': {
-            'n': n_valid_left,
-            'final_x_mean': np.mean(left_final_x),
-            'final_x_std': np.std(left_final_x),
-            'final_y_mean': np.mean(left_final_y),
-            'final_y_std': np.std(left_final_y),
-        },
-        'right': {
-            'n': n_valid_right,
-            'final_x_mean': np.mean(right_final_x),
-            'final_x_std': np.std(right_final_x),
-            'final_y_mean': np.mean(right_final_y),
-            'final_y_std': np.std(right_final_y),
-        },
-        'tests': {
-            'x_statistic': stat_x,
-            'x_pvalue': p_x,
-            'y_statistic': stat_y,
-            'y_pvalue': p_y,
-        },
-    }
-
-    print(f"\n  Left trials - Final position (last {window_duration}s):")
-    print(f"    X: {stats_dict['left']['final_x_mean']:.3f} ± {stats_dict['left']['final_x_std']:.3f}")
-    print(f"    Y: {stats_dict['left']['final_y_mean']:.3f} ± {stats_dict['left']['final_y_std']:.3f}")
-    print(f"  Right trials - Final position (last {window_duration}s):")
-    print(f"    X: {stats_dict['right']['final_x_mean']:.3f} ± {stats_dict['right']['final_x_std']:.3f}")
-    print(f"    Y: {stats_dict['right']['final_y_mean']:.3f} ± {stats_dict['right']['final_y_std']:.3f}")
-    print(f"\n  Mann-Whitney U test:")
-    print(f"    X-position: U={stat_x:.1f}, p={p_x:.4f} {'***' if p_x < 0.001 else '**' if p_x < 0.01 else '*' if p_x < 0.05 else 'ns'}")
-    print(f"    Y-position: U={stat_y:.1f}, p={p_y:.4f} {'***' if p_y < 0.001 else '**' if p_y < 0.01 else '*' if p_y < 0.05 else 'ns'}")
-
-    # Create visualization
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-
-    # Get labels for positions
-    pos1_label = f"Pos ({sorted_positions[0][0]:+.1f}, {sorted_positions[0][1]:+.1f})"
-    if len(sorted_positions) == 2:
-        pos2_label = f"Pos ({sorted_positions[1][0]:+.1f}, {sorted_positions[1][1]:+.1f})"
-    else:
-        pos2_label = f"Other {len(sorted_positions)-1} positions"
-
-    # Use consistent colors
-    color1 = 'steelblue'
-    color2 = 'coral'
-
-    # Plot 1: X-position distributions
-    ax = axes[0, 0]
-    ax.hist(left_final_x, bins=20, alpha=0.6, color=color1, label=f'{pos1_label} (n={n_valid_left})')
-    ax.hist(right_final_x, bins=20, alpha=0.6, color=color2, label=f'{pos2_label} (n={n_valid_right})')
-    ax.axvline(np.mean(left_final_x), color=color1, linestyle='--', linewidth=2, label=f'Pos1 mean: {np.mean(left_final_x):.3f}')
-    ax.axvline(np.mean(right_final_x), color=color2, linestyle='--', linewidth=2, label=f'Pos2+ mean: {np.mean(right_final_x):.3f}')
-    ax.set_xlabel(f'Avg X Position (last {window_duration}s)', fontsize=12)
-    ax.set_ylabel('Count', fontsize=12)
-    ax.set_title(f'X-Position Distribution\np = {p_x:.4f}', fontsize=12, fontweight='bold')
-    ax.set_xlim(-1, 1)
-    ax.legend(fontsize=8)
-    ax.grid(True, alpha=0.3, axis='y')
-
-    # Plot 2: Y-position distributions
-    ax = axes[0, 1]
-    ax.hist(left_final_y, bins=20, alpha=0.6, color=color1, label=f'{pos1_label} (n={n_valid_left})')
-    ax.hist(right_final_y, bins=20, alpha=0.6, color=color2, label=f'{pos2_label} (n={n_valid_right})')
-    ax.axvline(np.mean(left_final_y), color=color1, linestyle='--', linewidth=2, label=f'Pos1 mean: {np.mean(left_final_y):.3f}')
-    ax.axvline(np.mean(right_final_y), color=color2, linestyle='--', linewidth=2, label=f'Pos2+ mean: {np.mean(right_final_y):.3f}')
-    ax.set_xlabel(f'Avg Y Position (last {window_duration}s)', fontsize=12)
-    ax.set_ylabel('Count', fontsize=12)
-    ax.set_title(f'Y-Position Distribution\np = {p_y:.4f}', fontsize=12, fontweight='bold')
-    ax.set_xlim(-1, 1)
-    ax.legend(fontsize=8)
-    ax.grid(True, alpha=0.3, axis='y')
-
-    # Plot 3: 2D scatter of final positions
-    ax = axes[1, 0]
-    # Draw actual target positions for all unique positions
-    from matplotlib.patches import Circle
-    colors_for_targets = plt.cm.tab10(np.linspace(0, 1, len(sorted_positions)))
-    for idx, pos in enumerate(sorted_positions):
-        target_x, target_y = pos
-        color = colors_for_targets[idx]
-        circle = Circle((target_x, target_y), radius=0.05, fill=False, edgecolor=color,
-                       linewidth=2, linestyle='--', alpha=0.6,
-                       label=f'Target ({target_x:+.1f}, {target_y:+.1f})')
-        ax.add_patch(circle)
-
-    ax.scatter(left_final_x, left_final_y, alpha=0.5, color=color1, s=30, label=f'{pos1_label} trials')
-    ax.scatter(right_final_x, right_final_y, alpha=0.5, color=color2, s=30, label=f'{pos2_label} trials')
-    # Plot means as larger markers
-    ax.scatter([np.mean(left_final_x)], [np.mean(left_final_y)], color=color1, s=200,
-               marker='*', edgecolors='black', linewidths=2, label=f'{pos1_label} mean', zorder=10)
-    ax.scatter([np.mean(right_final_x)], [np.mean(right_final_y)], color=color2, s=200,
-               marker='*', edgecolors='black', linewidths=2, label=f'{pos2_label} mean', zorder=10)
-    ax.set_xlabel(f'Avg X Position (last {window_duration}s)', fontsize=12)
-    ax.set_ylabel(f'Avg Y Position (last {window_duration}s)', fontsize=12)
-    ax.set_title('Average Positions (2D)', fontsize=12, fontweight='bold')
-    ax.set_xlim(-1, 1)
-    ax.set_ylim(-1, 1)
-    ax.legend(fontsize=9)
-    ax.grid(True, alpha=0.3)
-    ax.set_aspect('equal')
-
-    # Plot 4: Summary statistics table
-    ax = axes[1, 1]
-    ax.axis('off')
-
-    # Shorten labels for table if needed
-    table_pos1 = pos1_label if len(pos1_label) < 15 else f"Pos1"
-    table_pos2 = pos2_label if len(pos2_label) < 15 else f"Pos2+"
-
-    table_data = [
-        ['Metric', table_pos1, table_pos2, 'p-value'],
-        ['N trials', f"{n_valid_left}", f"{n_valid_right}", ''],
-        ['X position', f"{stats_dict['left']['final_x_mean']:.3f} ± {stats_dict['left']['final_x_std']:.3f}",
-         f"{stats_dict['right']['final_x_mean']:.3f} ± {stats_dict['right']['final_x_std']:.3f}",
-         f"{p_x:.4f} {'***' if p_x < 0.001 else '**' if p_x < 0.01 else '*' if p_x < 0.05 else 'ns'}"],
-        ['Y position', f"{stats_dict['left']['final_y_mean']:.3f} ± {stats_dict['left']['final_y_std']:.3f}",
-         f"{stats_dict['right']['final_y_mean']:.3f} ± {stats_dict['right']['final_y_std']:.3f}",
-         f"{p_y:.4f} {'***' if p_y < 0.001 else '**' if p_y < 0.01 else '*' if p_y < 0.05 else 'ns'}"],
-    ]
-
-    table = ax.table(cellText=table_data, cellLoc='center', loc='center',
-                     colWidths=[0.25, 0.25, 0.25, 0.25])
-    table.auto_set_font_size(False)
-    table.set_fontsize(10)
-    table.scale(1, 2)
-
-    # Style header row
-    for i in range(4):
-        table[(0, i)].set_facecolor('#40466e')
-        table[(0, i)].set_text_props(weight='bold', color='white')
-
-    ax.set_title('Summary Statistics\n(Mann-Whitney U Test)', fontsize=12, fontweight='bold', pad=20)
-
-    # Overall title
-    if len(sorted_positions) == 2:
-        title = f'Final Position Bias Analysis (avg last {window_duration}s): Position 1 vs Position 2'
-    else:
-        title = f'Final Position Bias Analysis (avg last {window_duration}s): {len(sorted_positions)} Positions'
-    if animal_id:
-        title += f' - {animal_id}'
-    if session_date:
-        title += f' ({session_date})'
-    title += f'\n(Trials filtered: {min_duration}s ≤ duration ≤ {max_duration}s, N valid={n_valid_left + n_valid_right})'
-    fig.suptitle(title, fontsize=14, fontweight='bold')
-
-    plt.tight_layout()
-
-    # Save figure if results directory provided
-    if results_dir:
-        results_dir.mkdir(parents=True, exist_ok=True)
-        prefix = f"{animal_id}_" if animal_id else ""
-        filename = f"{prefix}ending_position_bias.png"
-        fig.savefig(results_dir / filename, dpi=150, bbox_inches='tight')
-        print(f"\nSaved ending position bias plot to {results_dir / filename}")
-
-    return fig, stats_dict
-
-
 def compare_left_right_performance(trials: list[dict], left_x: float = -0.7, right_x: float = 0.7,
                                    tolerance: float = 0.1, results_dir: Optional[Path] = None,
                                    animal_id: Optional[str] = None, session_date: str = "") -> tuple:
@@ -1935,11 +1890,18 @@ def compare_left_right_performance(trials: list[dict], left_x: float = -0.7, rig
         path_lengths = [t['path_length'] for t in trial_list]
         efficiencies = [t['path_efficiency'] for t in trial_list]
         dir_errors = [t['initial_direction_error'] for t in trial_list if not np.isnan(t['initial_direction_error'])]
+        # Count successes and failures
+        successes = sum(1 for t in trial_list if not t.get('trial_failed', False))
+        failures = sum(1 for t in trial_list if t.get('trial_failed', False))
+        success_rate = successes / len(trial_list) if len(trial_list) > 0 else 0
         return {
             'durations': durations,
             'path_lengths': path_lengths,
             'efficiencies': efficiencies,
-            'dir_errors': dir_errors
+            'dir_errors': dir_errors,
+            'successes': successes,
+            'failures': failures,
+            'success_rate': success_rate
         }
 
     left_metrics = extract_metrics(left_trials)
@@ -1956,8 +1918,29 @@ def compare_left_right_performance(trials: list[dict], left_x: float = -0.7, rig
         left_metrics['efficiencies'], right_metrics['efficiencies'], alternative='two-sided'
     )
 
+    # Fisher's exact test for success rates
+    # Create contingency table: [[left_success, left_fail], [right_success, right_fail]]
+    contingency_table = [
+        [left_metrics['successes'], left_metrics['failures']],
+        [right_metrics['successes'], right_metrics['failures']]
+    ]
+    success_odds_ratio, success_p = scipy_stats.fisher_exact(contingency_table)
+
+    # Calculate chance levels for left and right separately
+    print("  Calculating chance level for left targets (1000 shuffles)...")
+    left_chance = calculate_chance_level(trials, n_shuffles=1000,
+                                         target_filter=lambda t: abs(t['target_x'] - left_x) < tolerance,
+                                         results_dir=results_dir)
+    print(f"  Left chance level: {100*left_chance:.1f}%")
+
+    print("  Calculating chance level for right targets (1000 shuffles)...")
+    right_chance = calculate_chance_level(trials, n_shuffles=1000,
+                                          target_filter=lambda t: abs(t['target_x'] - right_x) < tolerance,
+                                          results_dir=results_dir)
+    print(f"  Right chance level: {100*right_chance:.1f}%")
+
     # Create comparison plot
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
 
     # Plot 1: Time to Target
     ax = axes[0, 0]
@@ -2010,8 +1993,49 @@ def compare_left_right_performance(trials: list[dict], left_x: float = -0.7, rig
     ax.plot(1, np.mean(left_metrics['efficiencies']), 'ro', markersize=10, label='Mean')
     ax.plot(2, np.mean(right_metrics['efficiencies']), 'ro', markersize=10)
 
-    # Plot 4: Summary statistics table
-    ax = axes[1, 1]
+    # Plot 4: Success/Failure Rates
+    ax = axes[0, 2]
+    # Bar chart showing success and failure rates, plus chance levels
+    x_pos = np.array([0.7, 1.0, 1.3, 1.7, 2.0, 2.3])
+    success_counts = [left_metrics['successes'], left_metrics['failures'], left_chance * n_left,
+                     right_metrics['successes'], right_metrics['failures'], right_chance * n_right]
+    colors = ['forestgreen', 'firebrick', 'gray', 'forestgreen', 'firebrick', 'gray']
+    bars = ax.bar(x_pos, success_counts, width=0.25, color=colors, edgecolor='black', linewidth=1.5)
+
+    # Add count labels on bars
+    for i, (bar, count) in enumerate(zip(bars, success_counts)):
+        height = bar.get_height()
+        # For chance bars, just show percentage
+        if i == 2 or i == 5:
+            pct = 100 * left_chance if i == 2 else 100 * right_chance
+            ax.text(bar.get_x() + bar.get_width()/2., height,
+                    f'{pct:.1f}%',
+                    ha='center', va='bottom', fontsize=9, fontweight='bold')
+        else:
+            ax.text(bar.get_x() + bar.get_width()/2., height,
+                    f'{int(count)}',
+                    ha='center', va='bottom', fontsize=9, fontweight='bold')
+
+    # Add overall percentage labels for actual performance
+    left_success_pct = 100 * left_metrics['success_rate']
+    right_success_pct = 100 * right_metrics['success_rate']
+    ax.text(1.0, max(success_counts) * 0.4, f'{left_success_pct:.1f}%\nsuccess',
+            ha='center', va='center', fontsize=10, fontweight='bold',
+            bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.7))
+    ax.text(2.0, max(success_counts) * 0.4, f'{right_success_pct:.1f}%\nsuccess',
+            ha='center', va='center', fontsize=10, fontweight='bold',
+            bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.7))
+
+    ax.set_xticks([1.0, 2.0])
+    ax.set_xticklabels(['Left', 'Right'])
+    ax.set_ylabel('Trial Count', fontsize=12)
+    ax.set_title(f'Success/Failure Rates\np = {success_p:.4f}', fontsize=12, fontweight='bold')
+    ax.set_ylim(0, max(success_counts) * 1.3)
+    ax.grid(True, alpha=0.3, axis='y')
+    ax.legend([bars[0], bars[1], bars[2]], ['Success', 'Failure', 'Chance'], loc='upper right', fontsize=9)
+
+    # Plot 5: Summary statistics table
+    ax = axes[1, 2]
     ax.axis('off')
 
     # Create table data
@@ -2030,6 +2054,10 @@ def compare_left_right_performance(trials: list[dict], left_x: float = -0.7, rig
          f'{np.mean(left_metrics["efficiencies"]):.3f}±{np.std(left_metrics["efficiencies"]):.3f}',
          f'{np.mean(right_metrics["efficiencies"]):.3f}±{np.std(right_metrics["efficiencies"]):.3f}',
          f'{eff_p:.4f}'],
+        ['Success Rate',
+         f'{100*left_metrics["success_rate"]:.1f}% ({left_metrics["successes"]}/{n_left})',
+         f'{100*right_metrics["success_rate"]:.1f}% ({right_metrics["successes"]}/{n_right})',
+         f'{success_p:.4f}'],
     ]
 
     table = ax.table(cellText=table_data, cellLoc='center', loc='center',
@@ -2044,12 +2072,12 @@ def compare_left_right_performance(trials: list[dict], left_x: float = -0.7, rig
         table[(0, i)].set_text_props(weight='bold', color='white')
 
     # Highlight significant p-values
-    for i, p_val in enumerate([duration_p, length_p, eff_p], start=2):
+    for i, p_val in enumerate([duration_p, length_p, eff_p, success_p], start=2):
         if p_val < 0.05:
             table[(i, 3)].set_facecolor('#ffcccc')
             table[(i, 3)].set_text_props(weight='bold')
 
-    ax.set_title('Summary Statistics\n(Mann-Whitney U Test)', fontsize=12, fontweight='bold')
+    ax.set_title('Summary Statistics\n(Mann-Whitney U & Fisher Exact)', fontsize=12, fontweight='bold')
 
     # Overall title
     title = 'Left vs Right Target Performance'
@@ -2079,7 +2107,8 @@ def compare_left_right_performance(trials: list[dict], left_x: float = -0.7, rig
         'p_values': {
             'duration': duration_p,
             'path_length': length_p,
-            'path_efficiency': eff_p
+            'path_efficiency': eff_p,
+            'success_rate': success_p
         }
     }
 
@@ -2087,6 +2116,7 @@ def compare_left_right_performance(trials: list[dict], left_x: float = -0.7, rig
     print(f"\n  Duration: Left={np.mean(left_metrics['durations']):.2f}s, Right={np.mean(right_metrics['durations']):.2f}s, p={duration_p:.4f}")
     print(f"  Path Length: Left={np.mean(left_metrics['path_lengths']):.3f}, Right={np.mean(right_metrics['path_lengths']):.3f}, p={length_p:.4f}")
     print(f"  Path Efficiency: Left={np.mean(left_metrics['efficiencies']):.3f}, Right={np.mean(right_metrics['efficiencies']):.3f}, p={eff_p:.4f}")
+    print(f"  Success Rate: Left={100*left_metrics['success_rate']:.1f}% ({left_metrics['successes']}/{n_left}), Right={100*right_metrics['success_rate']:.1f}% ({right_metrics['successes']}/{n_right}), p={success_p:.4f}")
 
     if duration_p < 0.05:
         print(f"  *** Significant difference in duration (p < 0.05)")
@@ -2094,6 +2124,8 @@ def compare_left_right_performance(trials: list[dict], left_x: float = -0.7, rig
         print(f"  *** Significant difference in path length (p < 0.05)")
     if eff_p < 0.05:
         print(f"  *** Significant difference in efficiency (p < 0.05)")
+    if success_p < 0.05:
+        print(f"  *** Significant difference in success rate (p < 0.05)")
 
     return fig, stats_dict
 
@@ -2646,146 +2678,9 @@ def plot_heatmaps_by_position_and_visibility(trials: list[dict], results_dir: Op
     return fig
 
 
-def interactive_initial_direction_viewer(trials: list[dict], animal_id: Optional[str] = None,
-                                         session_date: str = ""):
-    """Interactive viewer showing initial direction vectors for each trial.
-
-    Similar to plot 3 but highlights the initial direction calculation. Shows:
-    - Full eye trajectory
-    - Initial direction vector (from start to 5th point or end of trial)
-    - Ideal vector (from start to target)
-    - Angle between them (initial direction error)
-
-    Press SPACE to advance to next trial.
-
-    This function is standalone and can be easily removed without affecting other analyses.
-
-    Parameters
-    ----------
-    trials : list of dict
-        List of trial data dictionaries
-    animal_id : str, optional
-        Animal identifier for title
-    session_date : str, optional
-        Session date for title
-    """
-    if len(trials) == 0:
-        print("No trials to display")
-        return
-
-    # Filter to trials with eye data
-    trials_with_data = [t for t in trials if len(t.get('eye_x', [])) > 0]
-    if len(trials_with_data) == 0:
-        print("No trials with eye tracking data")
-        return
-
-    print(f"Interactive Initial Direction Viewer: {len(trials_with_data)} trials")
-    print("Press SPACE to advance, ESC or 'q' to quit")
-
-    fig, ax = plt.subplots(figsize=(12, 10))
-    current_trial_idx = [0]  # Use list to allow modification in nested function
-
-    def plot_trial(idx):
-        ax.clear()
-        trial = trials_with_data[idx]
-
-        eye_x = trial['eye_x']
-        eye_y = trial['eye_y']
-        target_x = trial['target_x']
-        target_y = trial['target_y']
-        target_diameter = trial['target_diameter']
-        trial_num = trial.get('trial_number', idx + 1)
-        is_failed = trial.get('trial_failed', False)
-        initial_dir_error = trial.get('initial_direction_error', np.nan)
-
-        # Plot full trajectory
-        if is_failed:
-            ax.plot(eye_x, eye_y, 'r-', linewidth=1.5, alpha=0.6, label='Eye trajectory (FAILED)', zorder=1)
-        else:
-            ax.plot(eye_x, eye_y, 'b-', linewidth=1.5, alpha=0.6, label='Eye trajectory', zorder=1)
-
-        # Plot start position
-        start_x = eye_x[0]
-        start_y = eye_y[0]
-        ax.plot(start_x, start_y, 'go', markersize=12, label='Start', zorder=3)
-
-        # Calculate and plot initial direction vector (same logic as in extract_trial_trajectories)
-        n_samples = min(5, len(eye_x))
-        if n_samples > 1:
-            end_x = eye_x[n_samples - 1]
-            end_y = eye_y[n_samples - 1]
-
-            # Plot the points used for initial direction
-            ax.plot(eye_x[:n_samples], eye_y[:n_samples], 'o', color='orange',
-                   markersize=8, alpha=0.7, label=f'First {n_samples} points', zorder=2)
-
-            # Draw initial direction vector (thick arrow)
-            initial_dx = end_x - start_x
-            initial_dy = end_y - start_y
-            ax.arrow(start_x, start_y, initial_dx, initial_dy,
-                    head_width=0.05, head_length=0.05, fc='orange', ec='orange',
-                    linewidth=3, alpha=0.8, label='Initial direction', zorder=4,
-                    length_includes_head=True)
-
-        # Draw ideal vector to target (dashed arrow)
-        ideal_dx = target_x - start_x
-        ideal_dy = target_y - start_y
-        ax.arrow(start_x, start_y, ideal_dx, ideal_dy,
-                head_width=0.05, head_length=0.05, fc='purple', ec='purple',
-                linewidth=2, alpha=0.6, linestyle='--', label='Ideal direction',
-                zorder=4, length_includes_head=True)
-
-        # Plot target
-        target_circle = Circle((target_x, target_y), radius=target_diameter/2,
-                              fill=False, edgecolor='red', linewidth=2, linestyle='-')
-        ax.add_patch(target_circle)
-        ax.plot(target_x, target_y, 'r*', markersize=15, label='Target', zorder=5)
-
-        # Plot final position
-        final_x = trial.get('final_eye_x', eye_x[-1])
-        final_y = trial.get('final_eye_y', eye_y[-1])
-        ax.plot(final_x, final_y, 'ks', markersize=10, label='Final position', zorder=3)
-
-        ax.set_xlabel('Horizontal Position', fontsize=12)
-        ax.set_ylabel('Vertical Position', fontsize=12)
-
-        # Title with trial info and angle
-        title = f'Trial {trial_num}/{len(trials_with_data)}'
-        if not np.isnan(initial_dir_error):
-            title += f' - Initial Direction Error: {initial_dir_error:.1f}°'
-        else:
-            title += ' - Initial Direction Error: N/A'
-        title += f' (using {n_samples} points)'
-        if is_failed:
-            title += ' [FAILED]'
-
-        if animal_id or session_date:
-            title = f'{animal_id} {session_date}\n{title}'
-
-        ax.set_title(title, fontsize=12, fontweight='bold')
-        ax.legend(loc='upper right', fontsize=9)
-        ax.grid(True, alpha=0.3)
-        ax.set_xlim(-1.7, 1.7)
-        ax.set_ylim(-1, 1)
-        ax.set_aspect('equal', adjustable='box')
-
-        fig.canvas.draw()
-
-    def on_key(event):
-        if event.key == ' ':  # Space bar
-            current_trial_idx[0] = (current_trial_idx[0] + 1) % len(trials_with_data)
-            plot_trial(current_trial_idx[0])
-        elif event.key in ['escape', 'q']:
-            plt.close(fig)
-
-    fig.canvas.mpl_connect('key_press_event', on_key)
-
-    # Plot first trial
-    plot_trial(0)
-    plt.show()
 
 # Fixation detection parameters - shared across analysis functions
-FIXATION_MIN_DURATION = 0.75  # seconds
+FIXATION_MIN_DURATION = 0.65  # seconds
 FIXATION_MAX_MOVEMENT = 0.1  # stimulus units
 def interactive_fixation_viewer(trials: list[dict], animal_id: Optional[str] = None,
                                  session_date: str = "", 
@@ -2830,59 +2725,6 @@ def interactive_fixation_viewer(trials: list[dict], animal_id: Optional[str] = N
     fig, ax = plt.subplots(figsize=(12, 10))
     current_trial_idx = [0]  # Use list to allow modification in nested function
 
-    def detect_fixations(eye_x, eye_y, eye_times):
-        """Detect fixation windows based on frame-to-frame movement velocity.
-
-        A fixation is a continuous segment where every consecutive frame-to-frame
-        movement is < max_movement, lasting for at least min_duration.
-
-        Returns list of tuples: (start_idx, end_idx, duration, span)
-        where span is calculated for informational purposes but NOT used for detection.
-        """
-        if len(eye_x) < 2:
-            return []
-
-        n = len(eye_x)
-        fixations = []
-
-        i = 0
-        while i < n:
-            # Try to extend a fixation starting at point i
-            j = i + 1
-
-            # Extend while frame-to-frame movement is below threshold
-            while j < n:
-                # Calculate movement from point j-1 to point j
-                dx = eye_x[j] - eye_x[j-1]
-                dy = eye_y[j] - eye_y[j-1]
-                movement = np.sqrt(dx**2 + dy**2)
-
-                if movement < max_movement:
-                    j += 1  # Include point j in the fixation
-                else:
-                    break  # Movement too large, stop before point j
-
-            # Now we have a potential fixation from index i to j (exclusive end)
-            # This includes points [i, i+1, ..., j-1]
-
-            if j > i + 1:  # At least 2 points
-                duration = eye_times[j-1] - eye_times[i]
-                if duration >= min_duration:
-                    # Valid fixation! Calculate span for informational purposes
-                    fix_x = eye_x[i:j]
-                    fix_y = eye_y[i:j]
-                    x_range = np.max(fix_x) - np.min(fix_x)
-                    y_range = np.max(fix_y) - np.min(fix_y)
-                    span = np.sqrt(x_range**2 + y_range**2)
-                    fixations.append((i, j, duration, span))
-                    i = j  # Start next search after this fixation
-                else:
-                    i += 1  # Duration too short, try next starting point
-            else:
-                i += 1  # No valid extension, try next starting point
-
-        return fixations
-
     def plot_trial(idx):
         ax.clear()
         trial = trials_with_data[idx]
@@ -2902,8 +2744,8 @@ def interactive_fixation_viewer(trials: list[dict], animal_id: Optional[str] = N
         is_failed = trial.get('trial_failed', False)
         target_visible = trial.get('target_visible', 1)
 
-        # Detect fixations
-        fixations = detect_fixations(eye_x, eye_y, eye_times)
+        # Detect fixations (uses shared module-level function)
+        fixations = detect_fixations(eye_x, eye_y, eye_times, min_duration, max_movement)
 
         # Plot full trajectory (lighter)
         if is_failed:
@@ -3247,6 +3089,249 @@ def save_detailed_fixation_data(trials: list[dict], results_dir: Optional[Path] 
     return df
 
 
+def calculate_and_validate_trial_success(trials: list[dict], eot_df: pd.DataFrame,
+                                         min_fixation_duration: float = 0.65,
+                                         max_movement: float = 0.1) -> pd.DataFrame:
+    """Calculate trial success from fixation data and compare to actual trial success.
+
+    For each trial, this function:
+    1. Detects fixations using frame-to-frame movement threshold (same as interactive viewer)
+    2. Uses ONLY the LAST fixation (since each prosaccade trial should have only one fixation)
+    3. Checks if the last fixation ENDS on target (within contact_threshold)
+    4. Determines if the last fixation meets the minimum duration requirement
+    5. Compares to actual trial_success from task
+
+    Success criteria:
+    - Fixation detected when consecutive frame-to-frame movements < max_movement
+    - Uses ONLY the LAST fixation detected
+    - Fixation must END on target (last point within contact_threshold: target_radius + cursor_radius)
+    - Fixation duration must be >= min_fixation_duration (default: 0.65s)
+
+    NOTE: In prosaccade trials, there should ideally be only one fixation:
+    - A fixation inside the target should end the trial with success
+    - A fixation outside the target should end the trial with failure
+    - If multiple fixations are detected, we use only the last one
+
+    Parameters
+    ----------
+    trials : list of dict
+        List of trial data dictionaries with eye position and target information
+    eot_df : pd.DataFrame
+        End-of-trial dataframe with actual trial_success column (2=success, !=2=failed)
+    min_fixation_duration : float
+        Minimum fixation duration required for success (default: 0.65 seconds)
+    max_movement : float
+        Maximum frame-to-frame movement for fixation detection (default: 0.1 units)
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with columns: trial_number, actual_success, calculated_success,
+        match, max_fixation_duration, explanation
+    """
+    print(f"\n{'='*80}")
+    print(f"TRIAL SUCCESS VALIDATION")
+    print(f"{'='*80}")
+    print(f"Calculating trial success from fixation data and comparing to actual results...")
+    print(f"Success criterion: LAST fixation (≥{min_fixation_duration}s) that ENDS on target")
+    print(f"Fixation detection: frame-to-frame movement < {max_movement} units")
+    print(f"  (Using ONLY the last fixation, counting TOTAL fixation duration)")
+    print()
+
+    results = []
+
+    # Debug: Print info about first few trials
+    debug_first_n = 5
+
+    for trial_idx, trial in enumerate(trials):
+        trial_num = trial.get('trial_number', -1)
+
+        debug_this_trial = (trial_idx < debug_first_n)
+
+        # Get actual trial success from eot_df
+        if trial_num <= len(eot_df):
+            actual_success_code = eot_df.iloc[trial_num - 1]['trial_success']
+            actual_success = (actual_success_code == 2)  # 2 = success
+        else:
+            actual_success_code = -1
+            actual_success = None
+
+
+        # Skip trials without eye data
+        if not trial.get('has_eye_data', False):
+            results.append({
+                'trial_number': trial_num,
+                'actual_success': actual_success,
+                'actual_success_code': actual_success_code,
+                'calculated_success': None,
+                'match': None,
+                'max_fixation_duration': 0.0,
+                'max_fixation_info': '',
+                'explanation': 'No eye data',
+                'target_x': trial.get('target_x', np.nan),
+                'target_y': trial.get('target_y', np.nan),
+                'contact_threshold': np.nan,
+                'num_fixations_detected': 0,
+                'num_on_target_fixations': 0,
+            })
+            continue
+
+        # Extract eye position data
+        eye_x = np.array(trial.get('eye_x', []))
+        eye_y = np.array(trial.get('eye_y', []))
+        eye_times = np.array(trial.get('eye_times', []))
+
+        if len(eye_x) == 0 or len(eye_times) == 0:
+            results.append({
+                'trial_number': trial_num,
+                'actual_success': actual_success,
+                'actual_success_code': actual_success_code,
+                'calculated_success': None,
+                'match': None,
+                'max_fixation_duration': 0.0,
+                'max_fixation_info': '',
+                'explanation': 'Empty eye trajectory',
+                'target_x': trial.get('target_x', np.nan),
+                'target_y': trial.get('target_y', np.nan),
+                'contact_threshold': np.nan,
+                'num_fixations_detected': 0,
+                'num_on_target_fixations': 0,
+            })
+            continue
+
+        # Get target information
+        target_x = trial['target_x']
+        target_y = trial['target_y']
+        target_radius = trial['target_diameter'] / 2.0
+        cursor_radius = trial.get('cursor_diameter', 0.2) / 2.0
+        contact_threshold = target_radius + cursor_radius
+
+
+        # Step 1: Detect all fixations using frame-to-frame movement (uses shared function)
+        fixations = detect_fixations(eye_x, eye_y, eye_times, min_fixation_duration, max_movement)
+
+        # Step 2: Use ONLY the LAST fixation
+        # In prosaccade trials, there should ideally be only one fixation:
+        # - A fixation inside the target ends the trial with success
+        # - A fixation outside the target ends the trial with failure
+        # If multiple fixations are detected, we use only the last one
+        max_fixation_duration = 0.0
+        max_fixation_info = ""
+        on_target_fixations = []
+
+        if len(fixations) > 0:
+            # Get the LAST fixation only
+            start_idx, end_idx, duration, span = fixations[-1]
+
+            # Get eye positions for the last fixation
+            fix_x = eye_x[start_idx:end_idx]
+            fix_y = eye_y[start_idx:end_idx]
+            fix_times = eye_times[start_idx:end_idx]
+
+            # Calculate distances from target for all points in fixation
+            fix_distances = np.sqrt((fix_x - target_x)**2 + (fix_y - target_y)**2)
+            within_target = fix_distances <= contact_threshold
+
+            # Check if the last fixation ENDS on target
+            ends_on_target = within_target[-1]
+
+            if ends_on_target:
+                # Last fixation ends on target, use its total duration
+                on_target_fixations.append((start_idx, end_idx, duration, span))
+                max_fixation_duration = duration
+                max_fixation_info = f"{duration:.3f}s total fixation (ends on target at t={fix_times[-1]:.2f}s)"
+
+        # Determine calculated success (last fixation ends on target with sufficient duration)
+        calculated_success = (max_fixation_duration >= min_fixation_duration)
+
+
+        # Check if it matches actual success
+        if actual_success is None:
+            match = None
+            explanation = f"No actual success data; calculated: {calculated_success}"
+        else:
+            match = (calculated_success == actual_success)
+            if match:
+                explanation = f"✓ Match: max_fixation={max_fixation_duration:.3f}s"
+            else:
+                if calculated_success and not actual_success:
+                    explanation = f"✗ MISMATCH: Calculated SUCCESS (fixation={max_fixation_duration:.3f}s) but actual FAILED"
+                else:
+                    explanation = f"✗ MISMATCH: Calculated FAILED (max_fixation={max_fixation_duration:.3f}s) but actual SUCCESS"
+
+        results.append({
+            'trial_number': trial_num,
+            'actual_success': actual_success,
+            'actual_success_code': actual_success_code,
+            'calculated_success': calculated_success,
+            'match': match,
+            'max_fixation_duration': max_fixation_duration,
+            'max_fixation_info': max_fixation_info,
+            'explanation': explanation,
+            'target_x': target_x,
+            'target_y': target_y,
+            'contact_threshold': contact_threshold,
+            'num_fixations_detected': len(fixations),
+            'num_on_target_fixations': len(on_target_fixations),
+        })
+
+    # Create DataFrame
+    df = pd.DataFrame(results)
+
+    # Print summary
+    print(f"\nResults for {len(df)} trials:")
+    print(f"-" * 80)
+
+    if df['match'].notna().any():
+        n_match = df['match'].sum()
+        n_total = df['match'].notna().sum()
+        n_mismatch = n_total - n_match
+
+        print(f"  Matches:     {n_match}/{n_total} ({100*n_match/n_total:.1f}%)")
+        print(f"  Mismatches:  {n_mismatch}/{n_total} ({100*n_mismatch/n_total:.1f}%)")
+        print()
+
+        # Show success breakdown (excluding None values)
+        n_actual_success = df['actual_success'].fillna(False).sum()
+        n_actual_failed = df[df['actual_success'] == False].shape[0]  # Count False values only
+        n_calc_success = df['calculated_success'].fillna(False).sum()
+        n_calc_failed = df[df['calculated_success'] == False].shape[0]  # Count False values only
+
+        print(f"  Actual:      {int(n_actual_success)} success, {int(n_actual_failed)} failed")
+        print(f"  Calculated:  {int(n_calc_success)} success, {int(n_calc_failed)} failed")
+        print()
+
+        # Show mismatches in detail (limit to first 10 for readability)
+        if n_mismatch > 0:
+            print(f"\n{'!'*80}")
+            print(f"MISMATCHES DETECTED ({int(n_mismatch)} trials):")
+            print(f"{'!'*80}")
+            mismatches = df[df['match'] == False].copy()
+
+            # Show first 10 mismatches in detail
+            n_show = min(10, len(mismatches))
+            print(f"\nShowing first {n_show} of {len(mismatches)} mismatches:")
+
+            for idx, (_, row) in enumerate(mismatches.head(n_show).iterrows()):
+                print(f"\n  Trial {int(row['trial_number'])}:")
+                print(f"    Actual: {'SUCCESS' if row['actual_success'] else 'FAILED'} (code={row['actual_success_code']})")
+                print(f"    Calculated: {'SUCCESS' if row['calculated_success'] else 'FAILED'}")
+                print(f"    Fixations detected: {int(row['num_fixations_detected'])} total, {int(row['num_on_target_fixations'])} on target")
+                print(f"    Max on-target fixation: {row['max_fixation_duration']:.3f}s (threshold: {min_fixation_duration}s)")
+                if row['max_fixation_info']:
+                    print(f"    {row['max_fixation_info']}")
+                print(f"    Contact threshold: {row['contact_threshold']:.4f}")
+                print(f"    Target position: ({row['target_x']:.3f}, {row['target_y']:.3f})")
+        else:
+            print(f"\n{'✓'*80}")
+            print(f"ALL TRIALS MATCH! Calculated success matches actual success perfectly.")
+            print(f"{'✓'*80}")
+
+    print(f"\n{' '*80}")
+
+    return df
+
+
 def create_vstim_go_fixation_csv(folder_path: Path, results_dir: Optional[Path] = None,
                                    animal_id: Optional[str] = None, session_date: str = "",
                                    min_duration: float = FIXATION_MIN_DURATION,
@@ -3282,9 +3367,6 @@ def create_vstim_go_fixation_csv(folder_path: Path, results_dir: Optional[Path] 
         Frame-by-frame data with fixation detection and target metrics
     """
     import pandas as pd
-
-    print(f"\nCreating vstim_go_fixation CSV...")
-    print(f"Fixation criteria: ≥{min_duration}s duration, frame-to-frame movement <{max_movement} units")
 
     # Load the CSV files
     folder_path = Path(folder_path)
@@ -3487,912 +3569,6 @@ def create_vstim_go_fixation_csv(folder_path: Path, results_dir: Optional[Path] 
 
     return eye_df
 
-def compare_fixations_frame_by_frame(folder_path: Path, vstim_go_fixation_df: Optional[pd.DataFrame] = None,
-                                      results_dir: Optional[Path] = None,
-                                      animal_id: Optional[str] = None, session_date: str = "",
-                                      min_duration: float = FIXATION_MIN_DURATION) -> pd.DataFrame:
-    """Compare fixations frame-by-frame between task's fixationlog and our vstim_go_fixation.
-
-    The task's fixationlog.csv has a last column where 0 indicates a fixation was detected
-    at that timepoint. Because fixations require a minimum duration, when the last column
-    is 0, it means that timepoint AND the previous min_duration seconds are all part of
-    the fixation.
-
-    This function:
-    1. Processes fixationlog.csv to identify all frames that are part of detected fixations
-    2. Compares with our vstim_go_fixation detection
-    3. Adds an 'agreement' column to fixationlog (1 = both agree, 0 = differ)
-    4. Only compares frames during trials (not inter-trial intervals)
-
-    Parameters
-    ----------
-    folder_path : Path
-        Path to session folder containing fixationlog.csv
-    vstim_go_fixation_df : pd.DataFrame, optional
-        DataFrame from create_vstim_go_fixation_csv (if already loaded)
-    results_dir : Path, optional
-        Directory to save output CSV
-    animal_id : str, optional
-        Animal identifier for filename
-    session_date : str, optional
-        Session date for filename
-    min_duration : float
-        Minimum fixation duration in seconds (default: 0.5)
-
-    Returns
-    -------
-    pd.DataFrame
-        fixationlog with added columns: task_in_fixation, our_in_fixation, agreement, trial_number
-    """
-    import pandas as pd
-
-    print(f"\nComparing fixations frame-by-frame...")
-    print(f"  Using minimum fixation duration: {min_duration}s")
-    folder_path = Path(folder_path)
-
-    # Load fixationlog.csv from task
-    fixlog_file = None
-    for f in folder_path.glob("*fixationlog*.csv"):
-        fixlog_file = f
-        break
-
-    if fixlog_file is None:
-        print("  No fixationlog.csv found in folder - cannot compare")
-        return pd.DataFrame()
-
-    print(f"  Loading task fixation log: {fixlog_file.name}")
-    try:
-        fixlog_df = pd.read_csv(fixlog_file)
-        print(f"    Loaded {len(fixlog_df)} rows from task fixationlog")
-        print(f"    Columns: {list(fixlog_df.columns)}")
-    except Exception as e:
-        print(f"    Error loading fixationlog: {e}")
-        return pd.DataFrame()
-
-    # Load vstim_go_fixation if not provided
-    if vstim_go_fixation_df is None:
-        vstim_go_fix_file = None
-        search_dirs = [results_dir, folder_path] if results_dir else [folder_path]
-        for search_dir in search_dirs:
-            if search_dir is None:
-                continue
-            for f in Path(search_dir).glob("*vstim_go_fixation*.csv"):
-                vstim_go_fix_file = f
-                break
-            if vstim_go_fix_file:
-                break
-
-        if vstim_go_fix_file is None:
-            print("  No vstim_go_fixation.csv found - run create_vstim_go_fixation_csv first")
-            return pd.DataFrame()
-
-        print(f"  Loading offline fixation analysis: {vstim_go_fix_file.name}")
-        vstim_go_fixation_df = pd.read_csv(vstim_go_fix_file)
-
-    print(f"    Loaded {len(vstim_go_fixation_df)} frames from our analysis")
-
-    # Identify the last column in fixationlog (fixation status)
-    last_col = fixlog_df.columns[-1]
-    print(f"  Fixation status column: '{last_col}'")
-
-    # Find which column has frame numbers or timestamps in fixationlog
-    frame_col = None
-    timestamp_col = None
-    for col in fixlog_df.columns:
-        col_lower = col.lower()
-        if 'frame' in col_lower:
-            frame_col = col
-        elif 'time' in col_lower and 'stamp' not in col_lower:
-            timestamp_col = col
-        elif 'timestamp' in col_lower:
-            timestamp_col = col
-
-    # If no frame column, use the first column (often frame number)
-    if frame_col is None and len(fixlog_df.columns) >= 1:
-        first_col = fixlog_df.columns[0]
-        if fixlog_df[first_col].dtype in ['int64', 'float64']:
-            frame_col = first_col
-            print(f"  Using first column '{frame_col}' as frame identifier")
-
-    if timestamp_col is None and len(fixlog_df.columns) >= 2:
-        second_col = fixlog_df.columns[1]
-        if fixlog_df[second_col].dtype == 'float64':
-            timestamp_col = second_col
-            print(f"  Using second column '{timestamp_col}' as timestamp")
-
-    if frame_col is None and timestamp_col is None:
-        print("  Error: Could not identify frame or timestamp column in fixationlog")
-        return pd.DataFrame()
-
-    # Process fixationlog to identify frames that are part of fixations
-    # When last_col == 0, that frame and previous min_duration seconds are in fixation
-    fixlog_df['task_in_fixation'] = False
-
-    # Debug: show unique values in last column
-    last_col_values = fixlog_df[last_col]
-    print(f"  Last column '{last_col}' dtype: {last_col_values.dtype}")
-    print(f"  Last column unique values: {sorted(last_col_values.unique())[:10]}...")  # Show first 10
-
-    # Find rows where fixation was detected (last column == 0)
-    # Handle different data types robustly
-    if last_col_values.dtype == 'object':  # String type
-        fixation_detected_mask = last_col_values.astype(str).str.strip() == '0'
-    elif np.issubdtype(last_col_values.dtype, np.floating):
-        fixation_detected_mask = np.abs(last_col_values) < 0.001  # Close to 0
-    else:
-        fixation_detected_mask = last_col_values == 0
-
-    fixation_detected_indices = fixlog_df[fixation_detected_mask].index.tolist()
-
-    print(f"  Found {len(fixation_detected_indices)} timepoints where task detected fixation (last_col=0)")
-
-    # For each detection point, mark it and previous min_duration seconds as in fixation
-    if timestamp_col:
-        timestamps = fixlog_df[timestamp_col].values
-        for idx in fixation_detected_indices:
-            detection_time = timestamps[idx]
-            lookback_start = detection_time - min_duration
-
-            # Mark all frames within the lookback window as in fixation
-            mask = (fixlog_df[timestamp_col] >= lookback_start) & (fixlog_df[timestamp_col] <= detection_time)
-            fixlog_df.loc[mask, 'task_in_fixation'] = True
-    elif frame_col:
-        # Estimate frame rate from vstim_go_fixation
-        if 'timestamp' in vstim_go_fixation_df.columns:
-            timestamps_our = vstim_go_fixation_df['timestamp'].values
-            if len(timestamps_our) > 1:
-                frame_rate = 1.0 / np.median(np.diff(timestamps_our))
-                frames_in_min_duration = int(min_duration * frame_rate)
-                print(f"  Estimated frame rate: {frame_rate:.1f} Hz, lookback frames: {frames_in_min_duration}")
-            else:
-                frames_in_min_duration = int(min_duration * 60)  # Assume 60 Hz
-        else:
-            frames_in_min_duration = int(min_duration * 60)  # Assume 60 Hz
-
-        frames = fixlog_df[frame_col].values
-        for idx in fixation_detected_indices:
-            detection_frame = frames[idx]
-            lookback_start = detection_frame - frames_in_min_duration
-
-            # Mark all frames within the lookback window as in fixation
-            mask = (fixlog_df[frame_col] >= lookback_start) & (fixlog_df[frame_col] <= detection_frame)
-            fixlog_df.loc[mask, 'task_in_fixation'] = True
-
-    task_in_fix_count = fixlog_df['task_in_fixation'].sum()
-    print(f"  After lookback processing: {task_in_fix_count} frames marked as in fixation by task")
-
-    # Merge fixationlog with vstim_go_fixation using nearest timestamp match
-    # (frame numbers may differ slightly between the two sources)
-    if timestamp_col and 'timestamp' in vstim_go_fixation_df.columns:
-        # Sort both by timestamp for merge_asof
-        fixlog_df_sorted = fixlog_df.sort_values(timestamp_col).copy()
-        vstim_sorted = vstim_go_fixation_df[['timestamp', 'frame', 'in_fixation', 'trial_number', 'within_contact_threshold']].sort_values('timestamp').copy()
-
-        # Use merge_asof to find nearest timestamp match
-        merged_df = pd.merge_asof(
-            fixlog_df_sorted,
-            vstim_sorted,
-            left_on=timestamp_col,
-            right_on='timestamp',
-            direction='nearest',
-            tolerance=0.1,  # Allow up to 100ms difference
-            suffixes=('', '_vstim')
-        )
-        print(f"  Merged {len(merged_df)} frames by nearest timestamp (tolerance=0.1s)")
-
-        # Check how many matched
-        matched_count = merged_df['in_fixation'].notna().sum()
-        print(f"  Successfully matched: {matched_count}/{len(merged_df)} frames")
-    elif frame_col and 'frame' in vstim_go_fixation_df.columns:
-        # Fallback: try merge_asof on frame number
-        fixlog_df_sorted = fixlog_df.sort_values(frame_col).copy()
-        vstim_sorted = vstim_go_fixation_df[['frame', 'in_fixation', 'trial_number', 'within_contact_threshold']].sort_values('frame').copy()
-
-        merged_df = pd.merge_asof(
-            fixlog_df_sorted,
-            vstim_sorted,
-            left_on=frame_col,
-            right_on='frame',
-            direction='nearest',
-            tolerance=5,  # Allow up to 5 frame difference
-            suffixes=('', '_vstim')
-        )
-        print(f"  Merged {len(merged_df)} frames by nearest frame number (tolerance=5)")
-    else:
-        print("  Warning: Could not merge - no timestamp or frame column found")
-        merged_df = fixlog_df.copy()
-        merged_df['in_fixation'] = np.nan
-        merged_df['trial_number'] = 0
-        merged_df['within_contact_threshold'] = np.nan
-
-    # Only compare during trials (trial_number > 0)
-    if 'trial_number' in merged_df.columns:
-        trial_mask = merged_df['trial_number'] > 0
-        print(f"  Frames during trials: {trial_mask.sum()} (excluding inter-trial intervals)")
-    else:
-        trial_mask = pd.Series([True] * len(merged_df))
-        print("  Warning: No trial_number column, comparing all frames")
-
-    # Calculate agreement column
-    # 1 if both agree (both True or both False), 0 if they differ
-    merged_df['our_in_fixation'] = merged_df['in_fixation'].fillna(False).astype(bool)
-    merged_df['agreement'] = np.where(
-        trial_mask,
-        (merged_df['task_in_fixation'] == merged_df['our_in_fixation']).astype(int),
-        -1  # Mark inter-trial frames as -1
-    )
-
-    # Calculate detailed comparison statistics (only during trials)
-    trial_df = merged_df[trial_mask].copy()
-
-    # True positives: both detect fixation
-    tp = ((trial_df['task_in_fixation'] == True) & (trial_df['our_in_fixation'] == True)).sum()
-    # True negatives: both detect no fixation
-    tn = ((trial_df['task_in_fixation'] == False) & (trial_df['our_in_fixation'] == False)).sum()
-    # False positives: we detect fixation, task doesn't
-    fp = ((trial_df['task_in_fixation'] == False) & (trial_df['our_in_fixation'] == True)).sum()
-    # False negatives: task detects fixation, we don't
-    fn = ((trial_df['task_in_fixation'] == True) & (trial_df['our_in_fixation'] == False)).sum()
-
-    total_trial_frames = len(trial_df)
-    agreement_rate = (tp + tn) / total_trial_frames * 100 if total_trial_frames > 0 else 0
-
-    print(f"\n  Comparison Results (during trials only):")
-    print(f"    Total trial frames: {total_trial_frames}")
-    print(f"    Agreement rate: {agreement_rate:.1f}%")
-    print(f"    Both detect fixation (TP): {tp} frames ({tp/total_trial_frames*100:.1f}%)")
-    print(f"    Both detect no fixation (TN): {tn} frames ({tn/total_trial_frames*100:.1f}%)")
-    print(f"    We detect, task doesn't (FP): {fp} frames ({fp/total_trial_frames*100:.1f}%)")
-    print(f"    Task detects, we don't (FN): {fn} frames ({fn/total_trial_frames*100:.1f}%)")
-
-    # Prepare output dataframe (fixationlog with added columns)
-    output_cols = list(fixlog_df.columns) + ['task_in_fixation', 'our_in_fixation', 'agreement']
-    if 'trial_number' in merged_df.columns:
-        output_cols.append('trial_number')
-
-    output_df = merged_df[[c for c in output_cols if c in merged_df.columns]].copy()
-
-    # Save output if results_dir provided
-    if results_dir is not None:
-        results_dir = Path(results_dir)
-        results_dir.mkdir(parents=True, exist_ok=True)
-
-        prefix = f"{animal_id}_{session_date}" if animal_id and session_date else (animal_id or "")
-        prefix = prefix + "_" if prefix else ""
-
-        # Save fixationlog with agreement
-        fixlog_output_path = results_dir / f"{prefix}fixationlog_with_agreement.csv"
-        output_df.to_csv(fixlog_output_path, index=False)
-        print(f"\n  Saved fixationlog with agreement to: {fixlog_output_path}")
-
-    return output_df
-
-
-def test_initial_direction_correlation(trials: list[dict], results_dir: Optional[Path] = None,
-                                        animal_id: Optional[str] = None, session_date: str = "") -> tuple:
-    """Test #2: Initial Direction Correlation - do initial movements point toward targets?
-
-    Voluntary movements should show strong correlation between initial movement direction
-    and the actual direction to the target. Random movements would show no correlation.
-
-    Parameters
-    ----------
-    trials : list of dict
-        List of trial data dictionaries
-    results_dir : Path, optional
-        Directory to save the figure
-    animal_id : str, optional
-        Animal identifier for filename
-    session_date : str, optional
-        Session date for title
-
-    Returns
-    -------
-    tuple of (fig, stats_dict)
-        Figure and dictionary containing correlation statistics
-    """
-    from scipy import stats as scipy_stats
-
-    # Calculate angles for each trial
-    target_angles = []
-    initial_angles = []
-
-    for trial in trials:
-        start_x = trial['eye_x'][0]
-        start_y = trial['eye_y'][0]
-        target_x = trial['target_x']
-        target_y = trial['target_y']
-
-        # Angle to target (in degrees, 0 = right, 90 = up)
-        target_angle = np.degrees(np.arctan2(target_y - start_y, target_x - start_x))
-
-        # Initial movement angle (using first 5 samples)
-        if len(trial['eye_x']) >= 5:
-            n_samples = 5
-            initial_x = trial['eye_x'][n_samples-1]
-            initial_y = trial['eye_y'][n_samples-1]
-            initial_angle = np.degrees(np.arctan2(initial_y - start_y, initial_x - start_x))
-
-            target_angles.append(target_angle)
-            initial_angles.append(initial_angle)
-
-    target_angles = np.array(target_angles)
-    initial_angles = np.array(initial_angles)
-
-    # FIXED: Handle circular statistics for left/right targets properly
-    # Left targets are at ~±180° (wraps around), right targets at ~0°
-    # Unwrap angles so left targets are consistently at 180° (not split between -180 and +180)
-    # This prevents artificial splitting of the same target direction
-
-    # For angles near ±180°, convert to +180° for consistency
-    target_angles = np.where(target_angles < -90, target_angles + 360, target_angles)
-    initial_angles = np.where(initial_angles < -90, initial_angles + 360, initial_angles)
-
-    # Now angles are in range [-90, 270] approximately
-    # Right targets: ~0°
-    # Left targets: ~180° (not split between -180 and +180)
-
-    # Calculate correlation
-    r, p_value = scipy_stats.pearsonr(target_angles, initial_angles)
-
-    # Create visualization
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
-
-    # Plot 1: Scatter plot with regression line
-    ax1.scatter(target_angles, initial_angles, alpha=0.6, s=60, edgecolors='black', linewidth=0.5)
-
-    # Determine plot range based on actual data
-    all_angles = np.concatenate([target_angles, initial_angles])
-    angle_min = max(-100, all_angles.min() - 10)
-    angle_max = min(280, all_angles.max() + 10)
-
-    # Add diagonal line (perfect correlation)
-    ax1.plot([angle_min, angle_max], [angle_min, angle_max], 'g--', linewidth=2, alpha=0.5,
-             label='Perfect correlation')
-
-    # Add reference lines for left (180°) and right (0°) targets
-    ax1.axvline(0, color='blue', linestyle=':', linewidth=1.5, alpha=0.6)
-    ax1.axvline(180, color='red', linestyle=':', linewidth=1.5, alpha=0.6)
-    ax1.axhline(0, color='blue', linestyle=':', linewidth=1.5, alpha=0.6)
-    ax1.axhline(180, color='red', linestyle=':', linewidth=1.5, alpha=0.6)
-
-    # Set limits
-    ax1.set_xlim(angle_min, angle_max)
-    ax1.set_ylim(angle_min, angle_max)
-
-    # Add regression line
-    z = np.polyfit(target_angles, initial_angles, 1)
-    p = np.poly1d(z)
-    x_fit = np.linspace(target_angles.min(), target_angles.max(), 100)
-    ax1.plot(x_fit, p(x_fit), 'r-', linewidth=2, label=f'Actual fit (r={r:.3f})')
-
-    ax1.set_xlabel('Target Direction (degrees)\n0°=right, 180°=left', fontsize=12)
-    ax1.set_ylabel('Initial Movement Direction (degrees)', fontsize=12)
-    ax1.set_title(f'Initial Direction Correlation\nr = {r:.3f}, p = {p_value:.4e}',
-                  fontsize=14, fontweight='bold')
-    ax1.legend(fontsize=10)
-    ax1.grid(True, alpha=0.3)
-    ax1.set_aspect('equal', adjustable='box')
-
-    # Add interpretation box
-    if r > 0.7 and p_value < 0.05:
-        interpretation = 'VOLUNTARY\n(strong correlation)'
-        box_color = 'lightgreen'
-    elif r > 0.4 and p_value < 0.05:
-        interpretation = 'Likely voluntary\n(moderate correlation)'
-        box_color = 'yellow'
-    else:
-        interpretation = 'Random or weak\n(low correlation)'
-        box_color = 'lightcoral'
-
-    ax1.text(0.05, 0.95, interpretation, transform=ax1.transAxes,
-            fontsize=12, verticalalignment='top', fontweight='bold',
-            bbox=dict(boxstyle='round', facecolor=box_color, alpha=0.8))
-
-    # Plot 2: Residuals (angular errors)
-    angular_errors = initial_angles - target_angles
-    # Normalize to [-180, 180]
-    angular_errors = (angular_errors + 180) % 360 - 180
-
-    ax2.hist(angular_errors, bins=30, color='steelblue', alpha=0.7, edgecolor='black')
-    ax2.axvline(0, color='red', linestyle='--', linewidth=2, label='Perfect aiming')
-    ax2.axvline(np.mean(angular_errors), color='orange', linestyle='-', linewidth=2,
-                label=f'Mean error: {np.mean(angular_errors):.1f}°')
-    ax2.set_xlabel('Angular Error (degrees)', fontsize=12)
-    ax2.set_ylabel('Count', fontsize=12)
-    ax2.set_title(f'Distribution of Aiming Errors\nStd = {np.std(angular_errors):.1f}°',
-                  fontsize=14, fontweight='bold')
-    ax2.legend(fontsize=10)
-    ax2.grid(True, alpha=0.3, axis='y')
-
-    # Overall title
-    title = 'Test #2: Initial Direction Correlation (Voluntary Control Test)'
-    if animal_id:
-        title += f' - {animal_id}'
-    if session_date:
-        title += f' ({session_date})'
-    fig.suptitle(title, fontsize=15, fontweight='bold')
-
-    plt.tight_layout()
-
-    # Save figure
-    if results_dir:
-        results_dir.mkdir(parents=True, exist_ok=True)
-        prefix = f"{animal_id}_" if animal_id else ""
-        filename = f"{prefix}saccade_feedback_test2_direction_correlation.png"
-        fig.savefig(results_dir / filename, dpi=150, bbox_inches='tight')
-        print(f"Saved initial direction correlation plot to {results_dir / filename}")
-
-    stats_dict = {
-        'r': r,
-        'p_value': p_value,
-        'mean_angular_error': np.mean(angular_errors),
-        'std_angular_error': np.std(angular_errors),
-        'n_trials': len(target_angles)
-    }
-
-    print(f"\nTest #2: Initial Direction Correlation")
-    print(f"  Correlation: r = {r:.3f}, p = {p_value:.4e}")
-    print(f"  Mean angular error: {np.mean(angular_errors):.1f}° ± {np.std(angular_errors):.1f}°")
-    print(f"  Interpretation: {'VOLUNTARY' if r > 0.7 and p_value < 0.05 else 'Random or weak'}")
-
-    return fig, stats_dict
-
-
-def test_trial_to_trial_adaptation(trials: list[dict], results_dir: Optional[Path] = None,
-                                   animal_id: Optional[str] = None, session_date: str = "") -> tuple:
-    """Test #3: Trial-to-Trial Learning/Adaptation
-
-    Voluntary behavior should show trial-to-trial correlations in performance,
-    either through error correction or learning consistency. Random movements
-    would show no correlation between consecutive trials.
-
-    Parameters
-    ----------
-    trials : list of dict
-        List of trial data dictionaries
-    results_dir : Path, optional
-        Directory to save the figure
-    animal_id : str, optional
-        Animal identifier for filename
-    session_date : str, optional
-        Session date for title
-
-    Returns
-    -------
-    tuple of (fig, stats_dict)
-        Figure and dictionary containing auto-correlation statistics
-    """
-    from scipy import stats as scipy_stats
-
-    # Extract metrics
-    durations = np.array([t['duration'] for t in trials])
-    efficiencies = np.array([t['path_efficiency'] for t in trials])
-    dir_errors = np.array([t['initial_direction_error'] for t in trials])
-
-    # Calculate consecutive differences (trial N+1 - trial N)
-    duration_diffs = np.diff(durations)
-    efficiency_diffs = np.diff(efficiencies)
-
-    # Calculate auto-correlation (correlation between trial N and trial N+1)
-    duration_autocorr, duration_p = scipy_stats.pearsonr(durations[:-1], durations[1:])
-    efficiency_autocorr, efficiency_p = scipy_stats.pearsonr(efficiencies[:-1], efficiencies[1:])
-
-    # Create visualization
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-
-    # Plot 1: Duration auto-correlation
-    ax = axes[0, 0]
-    ax.scatter(durations[:-1], durations[1:], alpha=0.6, s=60, edgecolors='black', linewidth=0.5)
-
-    # Add diagonal line (perfect persistence)
-    lim_min = min(durations.min(), durations.min())
-    lim_max = max(durations.max(), durations.max())
-    ax.plot([lim_min, lim_max], [lim_min, lim_max], 'g--', linewidth=2, alpha=0.5,
-            label='Perfect persistence')
-
-    # Add regression line
-    z = np.polyfit(durations[:-1], durations[1:], 1)
-    p = np.poly1d(z)
-    x_fit = np.linspace(durations.min(), durations.max(), 100)
-    ax.plot(x_fit, p(x_fit), 'r-', linewidth=2, label=f'r={duration_autocorr:.3f}')
-
-    ax.set_xlabel('Trial N Duration (s)', fontsize=11)
-    ax.set_ylabel('Trial N+1 Duration (s)', fontsize=11)
-    ax.set_title(f'Duration Auto-correlation\nr = {duration_autocorr:.3f}, p = {duration_p:.4f}',
-                 fontsize=12, fontweight='bold')
-    ax.legend(fontsize=9)
-    ax.grid(True, alpha=0.3)
-
-    # Plot 2: Efficiency auto-correlation
-    ax = axes[0, 1]
-    ax.scatter(efficiencies[:-1], efficiencies[1:], alpha=0.6, s=60,
-               edgecolors='black', linewidth=0.5, color='orange')
-
-    lim_min = efficiencies.min()
-    lim_max = efficiencies.max()
-    ax.plot([lim_min, lim_max], [lim_min, lim_max], 'g--', linewidth=2, alpha=0.5,
-            label='Perfect persistence')
-
-    z = np.polyfit(efficiencies[:-1], efficiencies[1:], 1)
-    p = np.poly1d(z)
-    x_fit = np.linspace(efficiencies.min(), efficiencies.max(), 100)
-    ax.plot(x_fit, p(x_fit), 'r-', linewidth=2, label=f'r={efficiency_autocorr:.3f}')
-
-    ax.set_xlabel('Trial N Efficiency', fontsize=11)
-    ax.set_ylabel('Trial N+1 Efficiency', fontsize=11)
-    ax.set_title(f'Efficiency Auto-correlation\nr = {efficiency_autocorr:.3f}, p = {efficiency_p:.4f}',
-                 fontsize=12, fontweight='bold')
-    ax.legend(fontsize=9)
-    ax.grid(True, alpha=0.3)
-
-    # Plot 3: Duration changes over trials
-    ax = axes[1, 0]
-    trial_nums = np.arange(1, len(trials))
-    ax.plot(trial_nums, duration_diffs, 'o-', alpha=0.6, markersize=4)
-    ax.axhline(0, color='red', linestyle='--', linewidth=2, alpha=0.7, label='No change')
-    ax.set_xlabel('Trial Number', fontsize=11)
-    ax.set_ylabel('Duration Change (trial N+1 - N)', fontsize=11)
-    ax.set_title('Trial-to-Trial Duration Changes', fontsize=12, fontweight='bold')
-    ax.legend(fontsize=9)
-    ax.grid(True, alpha=0.3)
-
-    # Plot 4: Moving average of efficiency (learning curve)
-    ax = axes[1, 1]
-    window = min(10, len(efficiencies) // 3)  # Adaptive window size
-    if window >= 3:
-        moving_avg = np.convolve(efficiencies, np.ones(window)/window, mode='valid')
-        ax.plot(range(len(efficiencies)), efficiencies, 'o', alpha=0.3, markersize=4,
-                color='lightblue', label='Individual trials')
-        ax.plot(range(window-1, len(efficiencies)), moving_avg, 'b-', linewidth=3,
-                label=f'{window}-trial moving avg')
-
-        # Add trend line
-        trial_indices = np.arange(len(efficiencies))
-        z = np.polyfit(trial_indices, efficiencies, 1)
-        p = np.poly1d(z)
-        ax.plot(trial_indices, p(trial_indices), 'r--', linewidth=2,
-                label=f'Trend: {z[0]:+.4f}/trial')
-    else:
-        ax.plot(range(len(efficiencies)), efficiencies, 'o-', alpha=0.6, markersize=6)
-
-    ax.set_xlabel('Trial Number', fontsize=11)
-    ax.set_ylabel('Path Efficiency', fontsize=11)
-    ax.set_title('Learning Curve (Efficiency)', fontsize=12, fontweight='bold')
-    ax.legend(fontsize=9)
-    ax.grid(True, alpha=0.3)
-
-    # Overall interpretation
-    interpretation_lines = []
-    if abs(duration_autocorr) > 0.3 and duration_p < 0.05:
-        interpretation_lines.append(f"✓ Duration shows trial-to-trial correlation (r={duration_autocorr:.3f})")
-    if abs(efficiency_autocorr) > 0.3 and efficiency_p < 0.05:
-        interpretation_lines.append(f"✓ Efficiency shows trial-to-trial correlation (r={efficiency_autocorr:.3f})")
-
-    if len(interpretation_lines) > 0:
-        interpretation = "VOLUNTARY behavior:\n" + "\n".join(interpretation_lines)
-        box_color = 'lightgreen'
-    else:
-        interpretation = "Weak or no trial-to-trial correlation\n(consistent with random movements)"
-        box_color = 'lightcoral'
-
-    fig.text(0.5, 0.01, interpretation, ha='center', fontsize=11, fontweight='bold',
-             bbox=dict(boxstyle='round', facecolor=box_color, alpha=0.8))
-
-    # Overall title
-    title = 'Test #3: Trial-to-Trial Adaptation (Voluntary Control Test)'
-    if animal_id:
-        title += f' - {animal_id}'
-    if session_date:
-        title += f' ({session_date})'
-    fig.suptitle(title, fontsize=15, fontweight='bold')
-
-    plt.tight_layout(rect=[0, 0.03, 1, 0.97])
-
-    # Save figure
-    if results_dir:
-        results_dir.mkdir(parents=True, exist_ok=True)
-        prefix = f"{animal_id}_" if animal_id else ""
-        filename = f"{prefix}saccade_feedback_test3_trial_adaptation.png"
-        fig.savefig(results_dir / filename, dpi=150, bbox_inches='tight')
-        print(f"Saved trial-to-trial adaptation plot to {results_dir / filename}")
-
-    stats_dict = {
-        'duration_autocorr': duration_autocorr,
-        'duration_p': duration_p,
-        'efficiency_autocorr': efficiency_autocorr,
-        'efficiency_p': efficiency_p,
-        'n_trials': len(trials)
-    }
-
-    print(f"\nTest #3: Trial-to-Trial Adaptation")
-    print(f"  Duration auto-correlation: r = {duration_autocorr:.3f}, p = {duration_p:.4f}")
-    print(f"  Efficiency auto-correlation: r = {efficiency_autocorr:.3f}, p = {efficiency_p:.4f}")
-
-    return fig, stats_dict
-
-
-def test_speed_accuracy_tradeoff(trials: list[dict], results_dir: Optional[Path] = None,
-                                 animal_id: Optional[str] = None, session_date: str = "") -> tuple:
-    """Test #6: Speed-Accuracy Tradeoff
-
-    Voluntary movements typically show a speed-accuracy tradeoff: slower trials
-    are more efficient/accurate. Random movements would show no such relationship.
-
-    Parameters
-    ----------
-    trials : list of dict
-        List of trial data dictionaries
-    results_dir : Path, optional
-        Directory to save the figure
-    animal_id : str, optional
-        Animal identifier for filename
-    session_date : str, optional
-        Session date for title
-
-    Returns
-    -------
-    tuple of (fig, stats_dict)
-        Figure and dictionary containing correlation statistics
-    """
-    from scipy import stats as scipy_stats
-
-    # Extract metrics
-    durations = []
-    efficiencies = []
-
-    for trial in trials:
-        durations.append(trial['duration'])
-        efficiencies.append(trial['path_efficiency'])
-
-    durations = np.array(durations)
-    efficiencies = np.array(efficiencies)
-
-    # Calculate correlation
-    r_eff, p_eff = scipy_stats.pearsonr(durations, efficiencies)
-
-    # Create visualization
-    fig, ax = plt.subplots(1, 1, figsize=(10, 8))
-
-    # Color points by trial number to show temporal progression
-    trial_nums = np.arange(len(trials))
-    scatter = ax.scatter(durations, efficiencies, alpha=0.6, s=80, c=trial_nums,
-                         cmap='coolwarm', edgecolors='black', linewidth=0.5)
-
-    # Add regression line
-    z = np.polyfit(durations, efficiencies, 1)
-    p = np.poly1d(z)
-    x_fit = np.linspace(durations.min(), durations.max(), 100)
-    ax.plot(x_fit, p(x_fit), 'r-', linewidth=3, label=f'r={r_eff:.3f}')
-
-    ax.set_xlabel('Trial Duration (s)', fontsize=13)
-    ax.set_ylabel('Path Efficiency', fontsize=13)
-    ax.set_title(f'Speed vs Efficiency\nr = {r_eff:.3f}, p = {p_eff:.4f}',
-                  fontsize=15, fontweight='bold')
-    ax.legend(fontsize=11)
-    ax.grid(True, alpha=0.3)
-
-    # Add colorbar for trial progression
-    cbar = plt.colorbar(scatter, ax=ax, label='Trial Number')
-
-    # Add interpretation
-    if r_eff > 0.3 and p_eff < 0.05:
-        interpretation = 'VOLUNTARY\n(slower → more efficient)'
-        box_color = 'lightgreen'
-    elif r_eff < -0.3 and p_eff < 0.05:
-        interpretation = 'VOLUNTARY\n(faster → more efficient)'
-        box_color = 'lightgreen'
-    else:
-        interpretation = 'No clear tradeoff'
-        box_color = 'yellow'
-
-    ax.text(0.05, 0.95, interpretation, transform=ax.transAxes,
-            fontsize=12, verticalalignment='top', fontweight='bold',
-            bbox=dict(boxstyle='round', facecolor=box_color, alpha=0.8))
-
-    # Overall title
-    title = 'Test #6: Speed-Accuracy Tradeoff (Voluntary Control Test)'
-    if animal_id:
-        title += f' - {animal_id}'
-    if session_date:
-        title += f' ({session_date})'
-    fig.suptitle(title, fontsize=16, fontweight='bold')
-
-    plt.tight_layout()
-
-    # Save figure
-    if results_dir:
-        results_dir.mkdir(parents=True, exist_ok=True)
-        prefix = f"{animal_id}_" if animal_id else ""
-        filename = f"{prefix}saccade_feedback_test6_speed_accuracy.png"
-        fig.savefig(results_dir / filename, dpi=150, bbox_inches='tight')
-        print(f"Saved speed-accuracy tradeoff plot to {results_dir / filename}")
-
-    stats_dict = {
-        'r_duration_efficiency': r_eff,
-        'p_duration_efficiency': p_eff,
-        'n_trials': len(trials)
-    }
-
-    print(f"\nTest #6: Speed-Accuracy Tradeoff")
-    print(f"  Duration vs Efficiency: r = {r_eff:.3f}, p = {p_eff:.4f}")
-
-    return fig, stats_dict
-
-
-def test_reaction_time_consistency(trials: list[dict], movement_threshold: float = 0.01,
-                                   results_dir: Optional[Path] = None,
-                                   animal_id: Optional[str] = None, session_date: str = "") -> tuple:
-    """Test #7: Reaction Time Consistency
-
-    Voluntary movements should have consistent reaction times (latency from trial
-    start to first movement). Random movements would have high variance or no
-    consistent pattern.
-
-    Parameters
-    ----------
-    trials : list of dict
-        List of trial data dictionaries
-    movement_threshold : float
-        Distance threshold for detecting movement onset (default: 0.01)
-    results_dir : Path, optional
-        Directory to save the figure
-    animal_id : str, optional
-        Animal identifier for filename
-    session_date : str, optional
-        Session date for title
-
-    Returns
-    -------
-    tuple of (fig, stats_dict)
-        Figure and dictionary containing reaction time statistics
-    """
-    from scipy import stats as scipy_stats
-
-    # Calculate reaction times for each trial
-    reaction_times = []
-    reaction_distances = []
-
-    for trial in trials:
-        start_x = trial['eye_x'][0]
-        start_y = trial['eye_y'][0]
-        times = trial['eye_times'] - trial['eye_times'][0]  # Relative to trial start
-
-        # Find first movement (when cumulative distance exceeds threshold)
-        for i in range(1, len(trial['eye_x'])):
-            dist = np.sqrt((trial['eye_x'][i] - start_x)**2 + (trial['eye_y'][i] - start_y)**2)
-            if dist > movement_threshold:
-                reaction_times.append(times[i])
-                reaction_distances.append(dist)
-                break
-        else:
-            # No movement detected - use full duration
-            reaction_times.append(trial['duration'])
-            reaction_distances.append(0)
-
-    reaction_times = np.array(reaction_times)
-
-    # Calculate statistics
-    mean_rt = np.mean(reaction_times)
-    std_rt = np.std(reaction_times)
-    cv = std_rt / mean_rt if mean_rt > 0 else np.inf  # Coefficient of variation
-
-    # Create visualization
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-
-    # Plot 1: Histogram of reaction times
-    ax = axes[0, 0]
-    n, bins, patches = ax.hist(reaction_times, bins=25, color='steelblue', alpha=0.7,
-                                edgecolor='black')
-    ax.axvline(mean_rt, color='red', linestyle='--', linewidth=2,
-               label=f'Mean: {mean_rt:.3f}s')
-    ax.axvline(mean_rt - std_rt, color='orange', linestyle=':', linewidth=2, alpha=0.7)
-    ax.axvline(mean_rt + std_rt, color='orange', linestyle=':', linewidth=2, alpha=0.7,
-               label=f'±1 SD: {std_rt:.3f}s')
-
-    ax.set_xlabel('Reaction Time (s)', fontsize=12)
-    ax.set_ylabel('Count', fontsize=12)
-    ax.set_title(f'Reaction Time Distribution\nMean={mean_rt:.3f}s, SD={std_rt:.3f}s, CV={cv:.2f}',
-                 fontsize=13, fontweight='bold')
-    ax.legend(fontsize=10)
-    ax.grid(True, alpha=0.3, axis='y')
-
-    # Add interpretation
-    if cv < 0.3:
-        interpretation = 'VOLUNTARY\n(consistent RT, low CV)'
-        box_color = 'lightgreen'
-    elif cv < 0.5:
-        interpretation = 'Moderate consistency\n(medium CV)'
-        box_color = 'yellow'
-    else:
-        interpretation = 'High variability\n(inconsistent, high CV)'
-        box_color = 'lightcoral'
-
-    ax.text(0.95, 0.95, interpretation, transform=ax.transAxes,
-            fontsize=11, verticalalignment='top', horizontalalignment='right',
-            fontweight='bold', bbox=dict(boxstyle='round', facecolor=box_color, alpha=0.8))
-
-    # Plot 2: Reaction time across trials (check for learning/fatigue)
-    ax = axes[0, 1]
-    trial_nums = np.arange(1, len(reaction_times) + 1)
-    ax.plot(trial_nums, reaction_times, 'o', alpha=0.5, markersize=6)
-
-    # Add trend line
-    z = np.polyfit(trial_nums, reaction_times, 1)
-    p = np.poly1d(z)
-    ax.plot(trial_nums, p(trial_nums), 'r-', linewidth=2,
-            label=f'Trend: {z[0]:+.5f}s/trial')
-    ax.axhline(mean_rt, color='green', linestyle='--', linewidth=2, alpha=0.5,
-               label=f'Mean: {mean_rt:.3f}s')
-
-    ax.set_xlabel('Trial Number', fontsize=12)
-    ax.set_ylabel('Reaction Time (s)', fontsize=12)
-    ax.set_title('Reaction Time Across Session', fontsize=13, fontweight='bold')
-    ax.legend(fontsize=10)
-    ax.grid(True, alpha=0.3)
-
-    # Plot 3: Q-Q plot (test for normality)
-    ax = axes[1, 0]
-    scipy_stats.probplot(reaction_times, dist="norm", plot=ax)
-    ax.set_title('Q-Q Plot (Normality Test)', fontsize=13, fontweight='bold')
-    ax.grid(True, alpha=0.3)
-
-    # Shapiro-Wilk test for normality
-    if len(reaction_times) >= 3:
-        shapiro_stat, shapiro_p = scipy_stats.shapiro(reaction_times)
-        ax.text(0.05, 0.95, f'Shapiro-Wilk p={shapiro_p:.4f}\n' +
-                ('Normal' if shapiro_p > 0.05 else 'Non-normal'),
-                transform=ax.transAxes, fontsize=10, verticalalignment='top',
-                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-
-    # Plot 4: Cumulative distribution
-    ax = axes[1, 1]
-    sorted_rt = np.sort(reaction_times)
-    cumulative = np.arange(1, len(sorted_rt) + 1) / len(sorted_rt)
-    ax.plot(sorted_rt, cumulative, 'b-', linewidth=2)
-    ax.axvline(mean_rt, color='red', linestyle='--', linewidth=2, label=f'Mean: {mean_rt:.3f}s')
-    ax.axhline(0.5, color='gray', linestyle=':', linewidth=1, alpha=0.5)
-    ax.axvline(np.median(reaction_times), color='orange', linestyle='--', linewidth=2,
-               label=f'Median: {np.median(reaction_times):.3f}s')
-
-    ax.set_xlabel('Reaction Time (s)', fontsize=12)
-    ax.set_ylabel('Cumulative Probability', fontsize=12)
-    ax.set_title('Cumulative Distribution Function', fontsize=13, fontweight='bold')
-    ax.legend(fontsize=10)
-    ax.grid(True, alpha=0.3)
-
-    # Overall title
-    title = 'Test #7: Reaction Time Consistency (Voluntary Control Test)'
-    if animal_id:
-        title += f' - {animal_id}'
-    if session_date:
-        title += f' ({session_date})'
-    fig.suptitle(title, fontsize=15, fontweight='bold')
-
-    plt.tight_layout()
-
-    # Save figure
-    if results_dir:
-        results_dir.mkdir(parents=True, exist_ok=True)
-        prefix = f"{animal_id}_" if animal_id else ""
-        filename = f"{prefix}saccade_feedback_test7_reaction_time.png"
-        fig.savefig(results_dir / filename, dpi=150, bbox_inches='tight')
-        print(f"Saved reaction time consistency plot to {results_dir / filename}")
-
-    stats_dict = {
-        'mean_rt': mean_rt,
-        'std_rt': std_rt,
-        'cv': cv,
-        'median_rt': np.median(reaction_times),
-        'n_trials': len(reaction_times)
-    }
-
-    print(f"\nTest #7: Reaction Time Consistency")
-    print(f"  Mean RT: {mean_rt:.3f}s ± {std_rt:.3f}s")
-    print(f"  Coefficient of Variation: {cv:.2f}")
-    print(f"  Interpretation: {'VOLUNTARY (consistent)' if cv < 0.3 else 'High variability'}")
-
-    return fig, stats_dict
 
 
 def export_eye_positions_csv(trials: list[dict], eye_df: pd.DataFrame,
@@ -4605,9 +3781,19 @@ def analyze_folder(folder_path: str | Path, results_dir: Optional[str | Path] = 
         print("No valid trials found, exiting")
         return pd.DataFrame()
 
+    # Validate trial success calculation from fixation data
+    validation_df = calculate_and_validate_trial_success(trials_all, eot_df, min_fixation_duration=0.65)
+
+    # Save validation results to CSV
+    if results_dir is not None:
+        validation_filename = f"{animal_id}_{date_str}_trial_success_validation.csv" if animal_id and date_str else "trial_success_validation.csv"
+        validation_filepath = results_dir / validation_filename
+        validation_df.to_csv(validation_filepath, index=False)
+        print(f"Saved validation results to: {validation_filepath}")
+
     # Plot trial success summary (uses ALL trials, independent of --include-failed-trials flag)
     print("\nGenerating trial success summary plot...")
-    fig_success = plot_trial_success(eot_df, results_dir, animal_id, date_str)
+    fig_success = plot_trial_success(eot_df, results_dir, animal_id, date_str, trials=trials_all)
     if fig_success is not None:
         if show_plots:
             plt.show()
@@ -4644,10 +3830,27 @@ def analyze_folder(folder_path: str | Path, results_dir: Optional[str | Path] = 
     plt.close(fig_path)
 
     print("\nRunning left vs right target comparison...")
-    fig_lr, lr_stats = compare_left_right_performance(trials_for_analysis, left_x=-0.7, right_x=0.7,
-                                                       results_dir=results_dir,
-                                                       animal_id=animal_id,
-                                                       session_date=date_str)
+    # Note: Always use trials_all for success/failure stats, regardless of --include-failed-trials flag
+    # Auto-detect left and right target positions from the data
+    unique_x_positions = sorted(list(set([t['target_x'] for t in trials_all])))
+    print(f"  Unique target X positions found: {unique_x_positions}")
+
+    # Use the leftmost and rightmost positions if we have at least 2
+    if len(unique_x_positions) >= 2:
+        detected_left_x = unique_x_positions[0]
+        detected_right_x = unique_x_positions[-1]
+        print(f"  Using left={detected_left_x:.2f}, right={detected_right_x:.2f}")
+        print(f"  (Using all {len(trials_all)} trials including failures for success rate calculation)")
+        fig_lr, lr_stats = compare_left_right_performance(trials_all,
+                                                           left_x=detected_left_x,
+                                                           right_x=detected_right_x,
+                                                           results_dir=results_dir,
+                                                           animal_id=animal_id,
+                                                           session_date=date_str)
+    else:
+        print(f"  Not enough unique X positions for left/right comparison")
+        fig_lr, lr_stats = None, None
+
     if fig_lr is not None:
         if show_plots:
             plt.show()
@@ -4672,12 +3875,6 @@ def analyze_folder(folder_path: str | Path, results_dir: Optional[str | Path] = 
             plt.show()
         plt.close(fig_vis_detailed)
 
-    # NEW: Interactive initial direction viewer
-    print("\nShowing interactive initial direction viewer...")
-    print("  (Shows initial direction vectors for each trial - press SPACE to advance)")
-    if show_plots:
-        interactive_initial_direction_viewer(trials_for_analysis, animal_id=animal_id, session_date=date_str)
-
     # NEW: Interactive fixation viewer
     print("\nShowing interactive fixation viewer...")
     print("  (Shows detected fixation periods for each trial - press SPACE to advance)")
@@ -4685,7 +3882,6 @@ def analyze_folder(folder_path: str | Path, results_dir: Optional[str | Path] = 
         interactive_fixation_viewer(trials_for_analysis, animal_id=animal_id, session_date=date_str)
 
     # NEW: Create vstim_go_fixation CSV (single source of truth for fixation detection)
-    print("\nCreating vstim_go_fixation CSV...")
     vstim_go_fixation_df = create_vstim_go_fixation_csv(folder_path, results_dir=results_dir,
                                                          animal_id=animal_id,
                                                          session_date=date_str)
@@ -4697,13 +3893,7 @@ def analyze_folder(folder_path: str | Path, results_dir: Optional[str | Path] = 
                                                         session_date=date_str,
                                                         vstim_go_fixation_df=vstim_go_fixation_df)
 
-    # NEW: Frame-by-frame comparison with agreement column
-    fixlog_with_agreement = compare_fixations_frame_by_frame(
-        folder_path, vstim_go_fixation_df=vstim_go_fixation_df,
-        results_dir=results_dir,
-        animal_id=animal_id,
-        session_date=date_str
-    )
+
 
     print("\nPlotting final positions by target type...")
     fig_final_pos = plot_final_positions_by_target(trials_for_analysis, min_duration=trial_min_duration, max_duration=trial_max_duration,
@@ -4715,16 +3905,6 @@ def analyze_folder(folder_path: str | Path, results_dir: Optional[str | Path] = 
             plt.show()
         plt.close(fig_final_pos)
 
-    # Export eye positions CSV with ITI markers
-    print("\nExporting eye positions to CSV...")
-    # Calculate ITI from target_df_all
-    if len(target_df_all) > 1:
-        time_diffs = np.diff(target_df_all['timestamp'].values)
-        min_diff = np.min(time_diffs)
-        ITI = np.floor(min_diff)
-    else:
-        ITI = 0
-    export_eye_positions_csv(trials_all, eye_df, results_dir, animal_id, date_str, ITI)
 
     # Create summary DataFrame
     durations = [t['duration'] for t in trials_for_analysis]
@@ -4758,22 +3938,6 @@ def analyze_folder(folder_path: str | Path, results_dir: Optional[str | Path] = 
     print(f"Animal: {animal_id}")
     print(f"Date: {date_str}")
     print(f"Valid trials: {len(trials_for_analysis)}")
-    print(f"\nTime to Target:")
-    print(f"  Mean: {np.mean(durations):.2f} ± {np.std(durations):.2f} s")
-    print(f"  Median: {np.median(durations):.2f} s")
-    print(f"  Range: {np.min(durations):.2f} - {np.max(durations):.2f} s")
-    print(f"\nPath Length:")
-    print(f"  Mean: {np.mean(path_lengths):.3f} ± {np.std(path_lengths):.3f}")
-    print(f"  Median: {np.median(path_lengths):.3f}")
-    print(f"  Range: {np.min(path_lengths):.3f} - {np.max(path_lengths):.3f}")
-    print(f"\nPath Efficiency (1.0 = perfectly direct):")
-    print(f"  Mean: {np.mean(efficiencies):.3f} ± {np.std(efficiencies):.3f}")
-    print(f"  Median: {np.median(efficiencies):.3f}")
-    if dir_errors:
-        print(f"\nInitial Direction Error:")
-        print(f"  Mean: {np.mean(dir_errors):.1f}° ± {np.std(dir_errors):.1f}°")
-        print(f"  Median: {np.median(dir_errors):.1f}°")
-    print("="*60)
 
     return df
 
@@ -4851,12 +4015,50 @@ def main(session_id: str, trial_min_duration: float = 0.01, trial_max_duration: 
         print("No valid trials found, exiting")
         return pd.DataFrame()
 
+    # Validate trial success calculation from fixation data
+    validation_df = calculate_and_validate_trial_success(trials_all, eot_df, min_fixation_duration=0.65)
+
+    # Save validation results to CSV
+    if results_dir is not None:
+        validation_filename = f"{animal_id}_{date_str}_trial_success_validation.csv" if animal_id and date_str else "trial_success_validation.csv"
+        validation_filepath = results_dir / validation_filename
+        validation_df.to_csv(validation_filepath, index=False)
+        print(f"Saved validation results to: {validation_filepath}")
+
     # Plot trial success summary (uses ALL trials, independent of --include-failed-trials flag)
     print("\nGenerating trial success summary plot...")
-    fig_success = plot_trial_success(eot_df, results_dir, animal_id, date_str)
+    fig_success = plot_trial_success(eot_df, results_dir, animal_id, date_str, trials=trials_all)
     if fig_success is not None:
         plt.show()
         plt.close(fig_success)
+
+
+    print("\nRunning left vs right target comparison...")
+    # Note: Always use trials_all for success/failure stats, regardless of --include-failed-trials flag
+    # Auto-detect left and right target positions from the data
+    unique_x_positions = sorted(list(set([t['target_x'] for t in trials_all])))
+    print(f"  Unique target X positions found: {unique_x_positions}")
+
+    # Use the leftmost and rightmost positions if we have at least 2
+    if len(unique_x_positions) >= 2:
+        detected_left_x = unique_x_positions[0]
+        detected_right_x = unique_x_positions[-1]
+        print(f"  Using left={detected_left_x:.2f}, right={detected_right_x:.2f}")
+        print(f"  (Using all {len(trials_all)} trials including failures for success rate calculation)")
+        fig_lr, lr_stats = compare_left_right_performance(trials_all,
+                                                           left_x=detected_left_x,
+                                                           right_x=detected_right_x,
+                                                           results_dir=results_dir,
+                                                           animal_id=animal_id,
+                                                           session_date=date_str)
+    else:
+        print(f"  Not enough unique X positions for left/right comparison")
+        fig_lr, lr_stats = None, None
+
+    if fig_lr is not None:
+        plt.show()
+        plt.close(fig_lr)
+
 
     # Generate plots
     print("\nGenerating trajectory plot...")
@@ -4895,14 +4097,7 @@ def main(session_id: str, trial_min_duration: float = 0.01, trial_max_duration: 
     # plt.show()
     # plt.close(fig_path)
 
-    # print("\nRunning left vs right target comparison...")
-    # fig_lr, lr_stats = compare_left_right_performance(trials_for_analysis, left_x=-0.7, right_x=0.7,
-    #                                                    results_dir=results_dir,
-    #                                                    animal_id=animal_id,
-    #                                                    session_date=date_str)
-    # if fig_lr is not None:
-    #     plt.show()
-    #     plt.close(fig_lr)
+
 
     # print("\nRunning visible vs invisible target comparison...")
     # fig_vis, vis_stats = compare_visible_invisible_performance(trials_for_analysis, results_dir=results_dir,
@@ -5009,22 +4204,6 @@ def main(session_id: str, trial_min_duration: float = 0.01, trial_max_duration: 
     print(f"Animal: {animal_id}")
     print(f"Date: {date_str}")
     print(f"Valid trials: {len(trials_for_analysis)}")
-    print(f"\nTime to Target:")
-    print(f"  Mean: {np.mean(durations):.2f} ± {np.std(durations):.2f} s")
-    print(f"  Median: {np.median(durations):.2f} s")
-    print(f"  Range: {np.min(durations):.2f} - {np.max(durations):.2f} s")
-    print(f"\nPath Length:")
-    print(f"  Mean: {np.mean(path_lengths):.3f} ± {np.std(path_lengths):.3f}")
-    print(f"  Median: {np.median(path_lengths):.3f}")
-    print(f"  Range: {np.min(path_lengths):.3f} - {np.max(path_lengths):.3f}")
-    print(f"\nPath Efficiency (1.0 = perfectly direct):")
-    print(f"  Mean: {np.mean(efficiencies):.3f} ± {np.std(efficiencies):.3f}")
-    print(f"  Median: {np.median(efficiencies):.3f}")
-    if dir_errors:
-        print(f"\nInitial Direction Error:")
-        print(f"  Mean: {np.mean(dir_errors):.1f}° ± {np.std(dir_errors):.1f}°")
-        print(f"  Median: {np.median(dir_errors):.1f}°")
-    print("="*60)
 
     return df
 
