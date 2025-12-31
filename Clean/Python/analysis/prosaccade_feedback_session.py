@@ -762,14 +762,20 @@ def interactive_trajectories(trials: list[dict], animal_id: Optional[str] = None
     plt.show()
 
 
-def plot_density_heatmap(trials: list[dict], results_dir: Optional[Path] = None,
+def plot_density_heatmap(trials: list[dict], eye_df: pd.DataFrame, results_dir: Optional[Path] = None,
                          animal_id: Optional[str] = None, session_date: str = "") -> plt.Figure:
-    """Plot 2D histogram heatmap showing density of eye positions across all trials.
+    """Plot 2D histogram heatmaps showing density of eye positions.
+
+    Creates a figure with two subplots:
+    1. Eye positions from trial data only (successful or all trials based on input)
+    2. All eye positions from continuous data (including ITIs)
 
     Parameters
     ----------
     trials : list of dict
         List of trial data dictionaries
+    eye_df : pd.DataFrame
+        Continuous eye position data for all recordings
     results_dir : Path, optional
         Directory to save the figure
     animal_id : str, optional
@@ -782,8 +788,9 @@ def plot_density_heatmap(trials: list[dict], results_dir: Optional[Path] = None,
     matplotlib.figure.Figure
         The generated figure
     """
-    fig, ax = plt.subplots(figsize=(12, 10))
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
 
+    # --- Subplot 1: Trial-based eye positions ---
     # Collect all eye positions from all trials
     all_x = []
     all_y = []
@@ -796,14 +803,14 @@ def plot_density_heatmap(trials: list[dict], results_dir: Optional[Path] = None,
 
     # Create 2D histogram
     bins = 50  # Number of bins in each dimension
-    h, xedges, yedges = np.histogram2d(all_x, all_y, bins=bins, range=[[-1, 1], [-1, 1]])
+    h, xedges, yedges = np.histogram2d(all_x, all_y, bins=bins, range=[[-1.7, 1.7], [-1, 1]])
 
     # Plot heatmap
     extent = [xedges[0], xedges[-1], yedges[0], yedges[-1]]
-    im = ax.imshow(h.T, extent=extent, origin='lower', cmap='hot', aspect='auto', interpolation='bilinear')
+    im1 = ax1.imshow(h.T, extent=extent, origin='lower', cmap='hot', aspect='auto', interpolation='bilinear')
 
     # Add colorbar
-    cbar = plt.colorbar(im, ax=ax, label='Number of Samples')
+    cbar1 = plt.colorbar(im1, ax=ax1, label='Number of Samples')
 
     # Overlay target positions
     for i, trial in enumerate(trials):
@@ -812,21 +819,53 @@ def plot_density_heatmap(trials: list[dict], results_dir: Optional[Path] = None,
         target_radius = trial['target_diameter'] / 2.0
         target_circle = Circle((target_x, target_y), radius=target_radius, fill=False,
                               edgecolor='cyan', linewidth=2, linestyle='-', alpha=0.7)
-        ax.add_patch(target_circle)
+        ax1.add_patch(target_circle)
 
-    ax.set_xlabel('Horizontal Position (stimulus units)', fontsize=12)
-    ax.set_ylabel('Vertical Position (stimulus units)', fontsize=12)
+    ax1.set_xlabel('Horizontal Position (stimulus units)', fontsize=12)
+    ax1.set_ylabel('Vertical Position (stimulus units)', fontsize=12)
+    ax1.set_title('Eye Position Density (Successful/All Trials)', fontsize=14, fontweight='bold')
+    ax1.set_xlim(-1.7, 1.7)
+    ax1.set_ylim(-1, 1)
+    ax1.set_aspect('equal', adjustable='box')
 
-    title = 'Eye Position Density Heatmap'
+    # --- Subplot 2: Continuous eye positions (all data including ITIs) ---
+    # Extract all eye positions from eye_df
+    continuous_x = eye_df['green_x'].values
+    continuous_y = eye_df['green_y'].values
+
+    # Create 2D histogram
+    h2, xedges2, yedges2 = np.histogram2d(continuous_x, continuous_y, bins=bins, range=[[-1.7, 1.7], [-1, 1]])
+
+    # Plot heatmap
+    extent2 = [xedges2[0], xedges2[-1], yedges2[0], yedges2[-1]]
+    im2 = ax2.imshow(h2.T, extent=extent2, origin='lower', cmap='hot', aspect='auto', interpolation='bilinear')
+
+    # Add colorbar
+    cbar2 = plt.colorbar(im2, ax=ax2, label='Number of Samples')
+
+    # Overlay target positions (if they exist in trials)
+    for i, trial in enumerate(trials):
+        target_x = trial['target_x']
+        target_y = trial['target_y']
+        target_radius = trial['target_diameter'] / 2.0
+        target_circle = Circle((target_x, target_y), radius=target_radius, fill=False,
+                              edgecolor='cyan', linewidth=2, linestyle='-', alpha=0.7)
+        ax2.add_patch(target_circle)
+
+    ax2.set_xlabel('Horizontal Position (stimulus units)', fontsize=12)
+    ax2.set_ylabel('Vertical Position (stimulus units)', fontsize=12)
+    ax2.set_title('Eye Position Density (Continuous - All Data)', fontsize=14, fontweight='bold')
+    ax2.set_xlim(-1.7, 1.7)
+    ax2.set_ylim(-1, 1)
+    ax2.set_aspect('equal', adjustable='box')
+
+    # Overall title
+    title = 'Eye Position Density Heatmaps'
     if animal_id:
         title += f' - {animal_id}'
     if session_date:
         title += f' ({session_date})'
-    ax.set_title(title, fontsize=14, fontweight='bold')
-
-    ax.set_xlim(-1.7, 1.7)
-    ax.set_ylim(-1, 1)
-    ax.set_aspect('equal', adjustable='box')
+    fig.suptitle(title, fontsize=16, fontweight='bold')
 
     plt.tight_layout()
 
@@ -1055,40 +1094,37 @@ def calculate_trial_success_from_fixations(eye_x: np.ndarray, eye_y: np.ndarray,
         return False, 0.0
 
 
-def calculate_chance_level(trials: list[dict], n_shuffles: int = 10000,
+def calculate_chance_level(trials: list[dict], n_shuffles: int = 1000,
                            target_filter: Optional[callable] = None,
                            min_fixation_duration: float = 0.65,
                            max_movement: float = 0.1,
                            results_dir: Optional[Path] = None) -> float:
-    """Calculate chance level success rate by shuffling target positions.
+    """Calculate chance level by matching actual fixation positions against shuffled targets.
 
-    Shuffles target positions randomly across trials and calculates what the
-    success rate would be if targets were at those shuffled positions, using
-    the actual fixation-based success criterion.
-
-    For subset analysis (e.g., left targets only):
-    - Filters trials to get specific eye trajectories (e.g., from left-target trials)
-    - But shuffles among ALL target positions from the full dataset
-    - This asks: "For these specific trials, what if targets were randomly placed anywhere?"
-
-    Success criterion (same as actual trials):
-    - Detects fixations when frame-to-frame movement < max_movement
-    - A fixation counts if it ENDS on the shuffled target
-    - Success if any fixation ending on target has duration >= min_fixation_duration
+    Algorithm:
+    1. For each trial, determine where the last fixation landed:
+       - 'Left' if last fixation ends on the left target
+       - 'Right' if last fixation ends on the right target
+       - 'Invalid' if no fixation detected or fixation doesn't land on either target
+    2. Generate random 50-50 Left/Right target assignments (n_shuffles times)
+    3. For each shuffle, count matches between fixation labels and shuffled targets
+    4. 'Invalid' fixations never match, so they always count as failures
+    5. Return average success rate across all shuffles
 
     Parameters
     ----------
     trials : list of dict
-        List of trial data dictionaries with eye trajectory and target information
+        List of trial data dictionaries with target information
     n_shuffles : int
-        Number of random shuffles to perform (default: 10000)
+        Number of random shuffles to perform (default: 1000)
     target_filter : callable, optional
-        Optional function to filter which trials' eye trajectories to use.
-        Note: Shuffles among ALL target positions regardless of filter.
+        Optional function to filter which trials to include
     min_fixation_duration : float
-        Minimum fixation duration required for success (default: 0.65 seconds)
+        Minimum fixation duration (default: 0.65 seconds)
     max_movement : float
-        Maximum frame-to-frame movement for fixation detection (default: 0.1 units)
+        Maximum movement for fixation detection (default: 0.1 units)
+    results_dir : Path, optional
+        Directory to save CSV output (only written when no filter applied)
 
     Returns
     -------
@@ -1098,31 +1134,7 @@ def calculate_chance_level(trials: list[dict], n_shuffles: int = 10000,
     if not trials or len(trials) == 0:
         return 0.0
 
-    # IMPORTANT: Extract ALL target positions BEFORE filtering
-    # This ensures we shuffle among all possible positions, not just the filtered subset
-    all_target_positions = np.array([(t['target_x'], t['target_y']) for t in trials])
-    all_target_diameters = np.array([t['target_diameter'] for t in trials])
-    all_cursor_diameters = np.array([t.get('cursor_diameter', 0.2) for t in trials])
-
-    # Remove any duplicate positions and their associated sizes for shuffling pool
-    # (we only need unique positions to shuffle from)
-    unique_positions = []
-    unique_diameters = []
-    unique_cursor_diams = []
-    seen = set()
-    for i, (tx, ty) in enumerate(all_target_positions):
-        key = (round(tx, 3), round(ty, 3))
-        if key not in seen:
-            seen.add(key)
-            unique_positions.append((tx, ty))
-            unique_diameters.append(all_target_diameters[i])
-            unique_cursor_diams.append(all_cursor_diameters[i])
-
-    shuffle_pool_positions = np.array(unique_positions)
-    shuffle_pool_diameters = np.array(unique_diameters)
-    n_unique_positions = len(shuffle_pool_positions)
-
-    # NOW apply filter to get specific trials (eye trajectories) to test
+    # Apply filter if provided
     filtered_trials = trials
     if target_filter is not None:
         filtered_trials = [t for t in trials if target_filter(t)]
@@ -1130,20 +1142,19 @@ def calculate_chance_level(trials: list[dict], n_shuffles: int = 10000,
     if len(filtered_trials) == 0:
         return 0.0
 
-    # Filter out trials without eye data
+    # Filter to trials with eye data
     valid_trials = []
     for trial in filtered_trials:
         if trial.get('has_eye_data', False):
             eye_x = np.array(trial.get('eye_x', []))
             eye_y = np.array(trial.get('eye_y', []))
             eye_times = np.array(trial.get('eye_times', []))
-            cursor_diam = trial.get('cursor_diameter', 0.2)
             if len(eye_x) > 0 and len(eye_times) > 0:
                 valid_trials.append({
                     'eye_x': eye_x,
                     'eye_y': eye_y,
                     'eye_times': eye_times,
-                    'cursor_diameter': cursor_diam,
+                    'cursor_diameter': trial.get('cursor_diameter', 0.2),
                     'target_x': trial['target_x'],
                     'target_y': trial['target_y'],
                     'target_diameter': trial['target_diameter']
@@ -1152,106 +1163,93 @@ def calculate_chance_level(trials: list[dict], n_shuffles: int = 10000,
     if len(valid_trials) == 0:
         return 0.0
 
-    n_valid = len(valid_trials)
-    success_rates = []
+    n_trials = len(valid_trials)
 
-    # Only write CSV for all trials (no filter applied)
+    # Step 1: Determine where each trial's last fixation landed (only once!)
+    fixation_labels = []  # Will be 'Left', 'Right', or 'Invalid'
+    actual_targets = []   # Will be 'Left' or 'Right'
+
+    for trial_data in valid_trials:
+        eye_x = trial_data['eye_x']
+        eye_y = trial_data['eye_y']
+        eye_times = trial_data['eye_times']
+        cursor_radius = trial_data['cursor_diameter'] / 2.0
+
+        # Determine actual target side
+        target_x = trial_data['target_x']
+        target_y = trial_data['target_y']
+        target_diameter = trial_data['target_diameter']
+        target_radius = target_diameter / 2.0
+        contact_threshold = target_radius + cursor_radius
+
+        actual_target = 'Left' if target_x < 0 else 'Right'
+        actual_targets.append(actual_target)
+
+        # Detect fixations
+        fixations = detect_fixations(eye_x, eye_y, eye_times,
+                                     min_fixation_duration, max_movement)
+
+        if len(fixations) == 0:
+            # No fixation detected
+            fixation_labels.append('Invalid')
+        else:
+            # Get the last fixation endpoint
+            _, end_idx, _, _ = fixations[-1]
+            final_x = eye_x[end_idx - 1]
+            final_y = eye_y[end_idx - 1]
+
+            # Check if it lands on left target (negative x)
+            # We need to check both left and right targets for this session
+            # Assume targets are symmetric on left/right sides
+            left_target_x = -abs(target_x)
+            left_target_y = target_y
+            right_target_x = abs(target_x)
+            right_target_y = target_y
+
+            # Check distance to left target
+            dist_left = np.sqrt((final_x - left_target_x)**2 + (final_y - left_target_y)**2)
+            on_left = dist_left <= contact_threshold
+
+            # Check distance to right target
+            dist_right = np.sqrt((final_x - right_target_x)**2 + (final_y - right_target_y)**2)
+            on_right = dist_right <= contact_threshold
+
+            if on_left:
+                fixation_labels.append('Left')
+            elif on_right:
+                fixation_labels.append('Right')
+            else:
+                fixation_labels.append('Invalid')
+
+    # Optional: Write CSV for debugging (first shuffle only)
     write_csv = (target_filter is None and results_dir is not None)
-    csv_writer = None
-    csvfile = None
-
     if write_csv:
         csv_path = results_dir / 'chance_level_trials.csv'
-        csvfile = open(csv_path, 'w', newline='')
-        csv_writer = csv.writer(csvfile)
-        csv_writer.writerow(['trial_number', 'fixation_ended_on', 'actual_target', 'shuffled_target'])
+        with open(csv_path, 'w', newline='') as csvfile:
+            csv_writer = csv.writer(csvfile)
+            csv_writer.writerow(['trial_number', 'fixation_landed_on', 'actual_target', 'shuffled_target'])
+
+            # Write one example shuffle
+            shuffled_targets = np.random.choice(['Left', 'Right'], size=n_trials)
+            for i in range(n_trials):
+                csv_writer.writerow([i + 1, fixation_labels[i], actual_targets[i], shuffled_targets[i]])
+
+    # Step 2: Bootstrap shuffles
+    success_rates = []
 
     for shuffle_idx in range(n_shuffles):
-        # Shuffle among ALL unique target positions, not just filtered ones
-        # Sample WITH replacement to match number of trials
-        random_indices = np.random.choice(n_unique_positions, size=n_valid, replace=True)
-        shuffled_targets = shuffle_pool_positions[random_indices]
+        # Randomly assign Left/Right targets with 50-50 probability
+        shuffled_targets = np.random.choice(['Left', 'Right'], size=n_trials)
 
-        # Calculate success for this shuffle by comparing target positions
+        # Count matches
         n_success = 0
-        for i in range(n_valid):
-            # Get actual and shuffled target positions
-            actual_target_x = valid_trials[i]['target_x']
-            actual_target_y = valid_trials[i]['target_y']
-            shuffled_x, shuffled_y = shuffled_targets[i]
-
-            # Determine sides
-            actual_target_side = 'left' if actual_target_x < 0 else 'right'
-            shuffled_target_side = 'left' if shuffled_x < 0 else 'right'
-
-            # Success if shuffled target matches actual target position
-            if actual_target_side == shuffled_target_side:
+        for i in range(n_trials):
+            if fixation_labels[i] == shuffled_targets[i]:
                 n_success += 1
 
-            # Only write to CSV for the first shuffle and when enabled
-            if write_csv and shuffle_idx == 0:
-                eye_x = valid_trials[i]['eye_x']
-                eye_y = valid_trials[i]['eye_y']
-                eye_times = valid_trials[i]['eye_times']
-                cursor_radius = valid_trials[i]['cursor_diameter'] / 2.0
-
-                # Determine where the last fixation ended by detecting fixations
-                fixations = detect_fixations(eye_x, eye_y, eye_times,
-                                            min_fixation_duration, max_movement)
-
-                if len(fixations) > 0:
-                    # Get the last fixation's ending position
-                    start_idx, end_idx, duration, span = fixations[-1]
-                    final_x = eye_x[end_idx - 1]
-                    final_y = eye_y[end_idx - 1]
-
-                    # Check which target the last fixation ended on
-                    # Find all left and right target positions from shuffle pool
-                    left_targets = [(tx, ty, shuffle_pool_diameters[idx])
-                                   for idx, (tx, ty) in enumerate(shuffle_pool_positions) if tx < 0]
-                    right_targets = [(tx, ty, shuffle_pool_diameters[idx])
-                                    for idx, (tx, ty) in enumerate(shuffle_pool_positions) if tx >= 0]
-
-                    # Check if fixation ended on left target
-                    on_left = False
-                    if left_targets:
-                        left_x, left_y, left_diam = left_targets[0]
-                        left_dist = np.sqrt((final_x - left_x)**2 + (final_y - left_y)**2)
-                        left_threshold = (left_diam / 2.0) + cursor_radius
-                        on_left = (left_dist <= left_threshold)
-
-                    # Check if fixation ended on right target
-                    on_right = False
-                    if right_targets:
-                        right_x, right_y, right_diam = right_targets[0]
-                        right_dist = np.sqrt((final_x - right_x)**2 + (final_y - right_y)**2)
-                        right_threshold = (right_diam / 2.0) + cursor_radius
-                        on_right = (right_dist <= right_threshold)
-
-                    # Determine which side the fixation ended on
-                    if on_left and not on_right:
-                        fixation_side = 'left'
-                    elif on_right and not on_left:
-                        fixation_side = 'right'
-                    elif on_left and on_right:
-                        # If on both (shouldn't happen), use closest
-                        fixation_side = 'left' if left_dist < right_dist else 'right'
-                    else:
-                        # Not on either target, use position
-                        fixation_side = 'left' if final_x < 0 else 'right'
-                else:
-                    # No fixations detected, use last position
-                    fixation_side = 'left' if eye_x[-1] < 0 else 'right'
-
-                # Write trial data
-                csv_writer.writerow([i + 1, fixation_side, actual_target_side, shuffled_target_side])
-
         # Calculate success rate for this shuffle
-        success_rate = n_success / n_valid if n_valid > 0 else 0.0
+        success_rate = n_success / n_trials if n_trials > 0 else 0.0
         success_rates.append(success_rate)
-
-    if csvfile:
-        csvfile.close()
 
     # Return average success rate across all shuffles
     return np.mean(success_rates)
@@ -1259,7 +1257,7 @@ def calculate_chance_level(trials: list[dict], n_shuffles: int = 10000,
 
 def plot_trial_success(eot_df: pd.DataFrame, results_dir: Optional[Path] = None,
                        animal_id: Optional[str] = None, session_date: str = "",
-                       trials: Optional[list[dict]] = None) -> plt.Figure:
+                       trials: Optional[list[dict]] = None, session_time: Optional[str] = None) -> plt.Figure:
     """Plot trial success vs failure summary, independent of --include-failed-trials flag.
 
     Creates a figure with:
@@ -1277,6 +1275,8 @@ def plot_trial_success(eot_df: pd.DataFrame, results_dir: Optional[Path] = None,
         Animal identifier for filename
     session_date : str, optional
         Session date for title
+    session_time : str, optional
+        Session time (HH:MM) for title
 
     Returns
     -------
@@ -1298,6 +1298,9 @@ def plot_trial_success(eot_df: pd.DataFrame, results_dir: Optional[Path] = None,
     n_failed = n_trials - n_success
     pct_success = 100 * n_success / n_trials if n_trials > 0 else 0
     pct_failed = 100 * n_failed / n_trials if n_trials > 0 else 0
+
+    # Get target diameter from trials (should be consistent across session)
+    target_diameter = trials[0]['target_diameter'] if trials and len(trials) > 0 else None
 
     # Calculate chance level if trials data is provided
     chance_level = None
@@ -1340,7 +1343,14 @@ def plot_trial_success(eot_df: pd.DataFrame, results_dir: Optional[Path] = None,
     if animal_id:
         title += f' - {animal_id}'
     if session_date:
-        title += f' ({session_date})'
+        title += f' ({session_date}'
+        if session_time:
+            title += f' @ {session_time}'
+        title += ')'
+    elif session_time:
+        title += f' @ {session_time}'
+    if target_diameter is not None:
+        title += f' | Target: {target_diameter:.2f}'
     ax1.set_title(title, fontsize=14, fontweight='bold')
     ax1.set_ylim(0, max(counts) * 1.2)  # Leave room for labels
     ax1.grid(True, alpha=0.3, axis='y')
@@ -2553,131 +2563,6 @@ def plot_visible_invisible_detailed_stats(trials: list[dict], results_dir: Optio
     return fig, stats_dict
 
 
-def plot_heatmaps_by_position_and_visibility(trials: list[dict], results_dir: Optional[Path] = None,
-                                              animal_id: Optional[str] = None, session_date: str = "",
-                                              left_threshold: float = 0.0, right_threshold: float = 0.0) -> plt.Figure:
-    """Plot 4 heatmaps showing eye position density for left/right × visible/invisible targets.
-
-    This function is standalone and can be easily removed without affecting other analyses.
-
-    Parameters
-    ----------
-    trials : list of dict
-        List of trial data dictionaries
-    results_dir : Path, optional
-        Directory to save the figure
-    animal_id : str, optional
-        Animal identifier for filename
-    session_date : str, optional
-        Session date for title
-    left_threshold : float
-        X-coordinate threshold - targets with x < this are considered "left" (default: 0.0)
-    right_threshold : float
-        X-coordinate threshold - targets with x > this are considered "right" (default: 0.0)
-
-    Returns
-    -------
-    matplotlib.figure.Figure
-        The generated figure with 4 subplots
-    """
-    # Filter trials into 4 groups
-    left_visible = [t for t in trials if t.get('target_x', 0) < left_threshold and t.get('target_visible', 1) == 1]
-    right_visible = [t for t in trials if t.get('target_x', 0) > right_threshold and t.get('target_visible', 1) == 1]
-    left_invisible = [t for t in trials if t.get('target_x', 0) < left_threshold and t.get('target_visible', 1) == 0]
-    right_invisible = [t for t in trials if t.get('target_x', 0) > right_threshold and t.get('target_visible', 1) == 0]
-
-    print(f"\nHeatmap breakdown:")
-    print(f"  Left Visible: {len(left_visible)} trials")
-    print(f"  Right Visible: {len(right_visible)} trials")
-    print(f"  Left Invisible: {len(left_invisible)} trials")
-    print(f"  Right Invisible: {len(right_invisible)} trials")
-
-    # Create 2x2 subplot figure
-    fig, axes = plt.subplots(2, 2, figsize=(16, 14))
-    fig.suptitle(f'Eye Position Heatmaps by Target Position & Visibility - {animal_id} - {session_date}',
-                fontsize=14, fontweight='bold')
-
-    # Helper function to create a heatmap for a specific group
-    def create_heatmap(ax, trial_group, title, group_name):
-        if len(trial_group) == 0:
-            ax.text(0.5, 0.5, f'No {group_name} trials', ha='center', va='center',
-                   transform=ax.transAxes, fontsize=14)
-            ax.set_xticks([])
-            ax.set_yticks([])
-            ax.set_title(title, fontsize=12, fontweight='bold')
-            return
-
-        # Collect all eye positions from this group
-        all_x = []
-        all_y = []
-        for trial in trial_group:
-            if len(trial['eye_x']) > 0:  # Only include trials with eye data
-                all_x.extend(trial['eye_x'])
-                all_y.extend(trial['eye_y'])
-
-        if len(all_x) == 0:
-            ax.text(0.5, 0.5, f'No eye data for\n{group_name} trials', ha='center', va='center',
-                   transform=ax.transAxes, fontsize=12)
-            ax.set_xticks([])
-            ax.set_yticks([])
-            ax.set_title(title, fontsize=12, fontweight='bold')
-            return
-
-        all_x = np.array(all_x)
-        all_y = np.array(all_y)
-
-        # Create 2D histogram
-        bins = 40  # Number of bins in each dimension
-        h, xedges, yedges = np.histogram2d(all_x, all_y, bins=bins, range=[[-1.7, 1.7], [-1, 1]])
-
-        # Plot heatmap
-        extent = [xedges[0], xedges[-1], yedges[0], yedges[-1]]
-        im = ax.imshow(h.T, extent=extent, origin='lower', cmap='hot', aspect='auto', interpolation='bilinear')
-
-        # Add colorbar
-        cbar = plt.colorbar(im, ax=ax, label='Number of Samples')
-
-        # Overlay target positions
-        for trial in trial_group:
-            target_x = trial['target_x']
-            target_y = trial['target_y']
-            target_radius = trial['target_diameter'] / 2.0
-            # Use different colors for visible vs invisible
-            if trial.get('target_visible', 1) == 1:
-                target_circle = Circle((target_x, target_y), radius=target_radius, fill=False,
-                                      edgecolor='cyan', linewidth=2, linestyle='-', alpha=0.7)
-            else:
-                target_circle = Circle((target_x, target_y), radius=target_radius, fill=False,
-                                      edgecolor='lime', linewidth=2, linestyle='--', alpha=0.7)
-            ax.add_patch(target_circle)
-
-        ax.set_xlabel('Horizontal Position', fontsize=11)
-        ax.set_ylabel('Vertical Position', fontsize=11)
-        ax.set_title(f'{title}\n(n={len(trial_group)} trials, {len(all_x)} samples)',
-                    fontsize=12, fontweight='bold')
-        ax.set_xlim(-1.7, 1.7)
-        ax.set_ylim(-1, 1)
-        ax.set_aspect('equal', adjustable='box')
-
-    # Create each heatmap
-    create_heatmap(axes[0, 0], left_visible, 'Left Visible', 'left visible')
-    create_heatmap(axes[0, 1], right_visible, 'Right Visible', 'right visible')
-    create_heatmap(axes[1, 0], left_invisible, 'Left Invisible', 'left invisible')
-    create_heatmap(axes[1, 1], right_invisible, 'Right Invisible', 'right invisible')
-
-    plt.tight_layout()
-
-    # Save figure
-    if results_dir:
-        results_dir.mkdir(parents=True, exist_ok=True)
-        filename = f"{animal_id}_{session_date}_heatmaps_position_visibility.png"
-        save_path = results_dir / filename
-        fig.savefig(save_path, dpi=150, bbox_inches='tight')
-        print(f"  Saved position×visibility heatmaps to {save_path}")
-
-    return fig
-
-
 
 # Fixation detection parameters - shared across analysis functions
 FIXATION_MIN_DURATION = 0.65  # seconds
@@ -3746,6 +3631,16 @@ def analyze_folder(folder_path: str | Path, results_dir: Optional[str | Path] = 
     date_match = re.search(r'\d{4}-\d{2}-\d{2}', str(folder_path))
     date_str = date_match.group() if date_match else ""
 
+    # Extract session time from folder path (format: AnimalID_YYYY-MM-DDTHH_MM_SS)
+    session_time = None
+    folder_name = folder_path.name
+    # Match pattern like "2025-12-31T11_12_01" using the last 'T'
+    time_match = re.search(r'\d{4}-\d{2}-\d{2}T(\d{2})_(\d{2})_\d{2}', folder_name)
+    if time_match:
+        hours = int(time_match.group(1))
+        minutes = int(time_match.group(2))
+        session_time = f"{hours:02d}:{minutes:02d}"
+
     # Load the three CSV files
     eot_df, eye_df, target_df_all = load_feedback_data(folder_path, animal_id)
 
@@ -3793,41 +3688,11 @@ def analyze_folder(folder_path: str | Path, results_dir: Optional[str | Path] = 
 
     # Plot trial success summary (uses ALL trials, independent of --include-failed-trials flag)
     print("\nGenerating trial success summary plot...")
-    fig_success = plot_trial_success(eot_df, results_dir, animal_id, date_str, trials=trials_all)
+    fig_success = plot_trial_success(eot_df, results_dir, animal_id, date_str, trials=trials_all, session_time=session_time)
     if fig_success is not None:
         if show_plots:
             plt.show()
         plt.close(fig_success)
-
-    # Interactive viewer: show all trials or just successful ones
-    print("\nShowing interactive trajectory viewer...")
-    if show_failed_in_viewer:
-        print(f"  Showing ALL {len(trials_all)} trials (including {len(failed_indices)} failed trials in RED)")
-        trials_for_viewer = trials_all
-    else:
-        print(f"  Showing only successful trials with eye data ({len(trials_successful)} trials)")
-        trials_for_viewer = trials_for_analysis
-    print("(Press SPACE to advance to next trial)")
-    if show_plots:
-        interactive_trajectories(trials_for_viewer, animal_id=animal_id, session_date=date_str)
-
-    print("\nGenerating density heatmap...")
-    fig_heat = plot_density_heatmap(trials_for_analysis, results_dir, animal_id, date_str)
-    if show_plots:
-        plt.show()
-    plt.close(fig_heat)
-
-    print("\nGenerating time-to-target plot...")
-    fig_time = plot_time_to_target(trials_for_analysis, results_dir, animal_id, date_str)
-    if show_plots:
-        plt.show()
-    plt.close(fig_time)
-
-    print("\nGenerating path length plot...")
-    fig_path = plot_path_length(trials_for_analysis, results_dir, animal_id, date_str)
-    if show_plots:
-        plt.show()
-    plt.close(fig_path)
 
     print("\nRunning left vs right target comparison...")
     # Note: Always use trials_all for success/failure stats, regardless of --include-failed-trials flag
@@ -3855,6 +3720,40 @@ def analyze_folder(folder_path: str | Path, results_dir: Optional[str | Path] = 
         if show_plots:
             plt.show()
         plt.close(fig_lr)
+
+
+    print("\nGenerating density heatmap...")
+    fig_heat = plot_density_heatmap(trials_for_analysis, eye_df, results_dir, animal_id, date_str)
+    if show_plots:
+        plt.show()
+    plt.close(fig_heat)
+
+    
+    # Interactive viewer: show all trials or just successful ones
+    print("\nShowing interactive trajectory viewer...")
+    if show_failed_in_viewer:
+        print(f"  Showing ALL {len(trials_all)} trials (including {len(failed_indices)} failed trials in RED)")
+        trials_for_viewer = trials_all
+    else:
+        print(f"  Showing only successful trials with eye data ({len(trials_successful)} trials)")
+        trials_for_viewer = trials_for_analysis
+    print("(Press SPACE to advance to next trial)")
+    if show_plots:
+        interactive_trajectories(trials_for_viewer, animal_id=animal_id, session_date=date_str)
+
+
+
+    # print("\nGenerating time-to-target plot...")
+    # fig_time = plot_time_to_target(trials_for_analysis, results_dir, animal_id, date_str)
+    # if show_plots:
+    #     plt.show()
+    # plt.close(fig_time)
+
+    # print("\nGenerating path length plot...")
+    # fig_path = plot_path_length(trials_for_analysis, results_dir, animal_id, date_str)
+    # if show_plots:
+    #     plt.show()
+    # plt.close(fig_path)
 
     print("\nRunning visible vs invisible target comparison...")
     fig_vis, vis_stats = compare_visible_invisible_performance(trials_for_analysis, results_dir=results_dir,
@@ -3944,8 +3843,11 @@ def analyze_folder(folder_path: str | Path, results_dir: Optional[str | Path] = 
 
 def main(session_id: str, trial_min_duration: float = 0.01, trial_max_duration: float = 15.0,
          show_failed_in_viewer: bool = False,
-         include_failed_trials: bool = False) -> pd.DataFrame:
+         include_failed_trials: bool = False, show_plots: bool = True) -> pd.DataFrame:
     """Run the saccade feedback analysis pipeline for ``session_id``.
+
+    This is a convenience wrapper around analyze_folder() that loads session
+    configuration from the session manifest.
 
     Parameters
     ----------
@@ -3960,6 +3862,8 @@ def main(session_id: str, trial_min_duration: float = 0.01, trial_max_duration: 
     include_failed_trials : bool
         Whether to include failed trials in ALL plots and analyses (default: False)
         When True, all plots will show both successful and failed trials
+    show_plots : bool
+        Whether to display plots (default: True)
 
     Returns
     -------
@@ -3970,242 +3874,20 @@ def main(session_id: str, trial_min_duration: float = 0.01, trial_max_duration: 
 
     folder_path = config.folder_path
     results_dir = config.results_dir
-    if results_dir is not None:
-        results_dir.mkdir(parents=True, exist_ok=True)
+    animal_id = config.animal_id or "Tsh001"
 
-    print(f"Session path: {folder_path}")
-    print(f"Results directory: {results_dir}")
-
-    # Get animal ID and date
-    animal_id = config.animal_id
-    date_str = config.params.get("date", "")
-
-    # Load the three CSV files
-    eot_df, eye_df, target_df_all = load_feedback_data(folder_path, animal_id or "Tsh001")
-
-    # Add original trial numbers (1-indexed) to preserve through filtering
-    target_df_all['original_trial_number'] = range(1, len(target_df_all) + 1)
-
-    # Always identify and filter failed trials for clean analysis
-    target_df_successful, failed_indices, successful_indices = identify_and_filter_failed_trials(
-        target_df_all, eot_df, exclude_failed=True
+    # Delegate to analyze_folder for all the actual work
+    return analyze_folder(
+        folder_path=folder_path,
+        results_dir=results_dir,
+        animal_id=animal_id,
+        show_plots=show_plots,
+        trial_min_duration=trial_min_duration,
+        trial_max_duration=trial_max_duration,
+        show_failed_in_viewer=show_failed_in_viewer,
+        include_failed_trials=include_failed_trials
     )
 
-    # Extract ALL trial trajectories for the interactive viewer (includes trials with no eye data)
-    # eot_df now contains ALL trials (successful + failed) with trial_success column
-    print("\nExtracting ALL trials for interactive viewer...")
-    print(f"  Using eot_df with {len(eot_df)} trials (matches target_df_all with {len(target_df_all)} trials)")
-
-    # Extract all trials (will include placeholders for trials with no eye data)
-    trials_all = extract_trial_trajectories(eot_df, eye_df, target_df_all,
-                                            successful_indices=successful_indices)
-
-    # Separate successful trials for analysis
-    trials_successful = [t for t in trials_all if not t.get('trial_failed', False) and t.get('has_eye_data', True)]
-
-    # Decide which trials to use for analysis based on include_failed_trials parameter
-    if include_failed_trials:
-        trials_for_analysis = trials_all
-        print(f"\nUsing ALL {len(trials_all)} trials for analysis (including {len(failed_indices)} failed trials)")
-    else:
-        trials_for_analysis = trials_successful
-        print(f"\nUsing only {len(trials_successful)} successful trials for analysis")
-
-    if len(trials_for_analysis) == 0:
-        print("No valid trials found, exiting")
-        return pd.DataFrame()
-
-    # Validate trial success calculation from fixation data
-    validation_df = calculate_and_validate_trial_success(trials_all, eot_df, min_fixation_duration=0.65)
-
-    # Save validation results to CSV
-    if results_dir is not None:
-        validation_filename = f"{animal_id}_{date_str}_trial_success_validation.csv" if animal_id and date_str else "trial_success_validation.csv"
-        validation_filepath = results_dir / validation_filename
-        validation_df.to_csv(validation_filepath, index=False)
-        print(f"Saved validation results to: {validation_filepath}")
-
-    # Plot trial success summary (uses ALL trials, independent of --include-failed-trials flag)
-    print("\nGenerating trial success summary plot...")
-    fig_success = plot_trial_success(eot_df, results_dir, animal_id, date_str, trials=trials_all)
-    if fig_success is not None:
-        plt.show()
-        plt.close(fig_success)
-
-
-    print("\nRunning left vs right target comparison...")
-    # Note: Always use trials_all for success/failure stats, regardless of --include-failed-trials flag
-    # Auto-detect left and right target positions from the data
-    unique_x_positions = sorted(list(set([t['target_x'] for t in trials_all])))
-    print(f"  Unique target X positions found: {unique_x_positions}")
-
-    # Use the leftmost and rightmost positions if we have at least 2
-    if len(unique_x_positions) >= 2:
-        detected_left_x = unique_x_positions[0]
-        detected_right_x = unique_x_positions[-1]
-        print(f"  Using left={detected_left_x:.2f}, right={detected_right_x:.2f}")
-        print(f"  (Using all {len(trials_all)} trials including failures for success rate calculation)")
-        fig_lr, lr_stats = compare_left_right_performance(trials_all,
-                                                           left_x=detected_left_x,
-                                                           right_x=detected_right_x,
-                                                           results_dir=results_dir,
-                                                           animal_id=animal_id,
-                                                           session_date=date_str)
-    else:
-        print(f"  Not enough unique X positions for left/right comparison")
-        fig_lr, lr_stats = None, None
-
-    if fig_lr is not None:
-        plt.show()
-        plt.close(fig_lr)
-
-
-    # Generate plots
-    print("\nGenerating trajectory plot...")
-    fig_traj = plot_trajectories(trials_for_analysis, results_dir, animal_id, date_str)
-    plt.show()
-    plt.close(fig_traj)
-
-    print("\nGenerating trajectory plot by direction (left vs right)...")
-    fig_traj_dir = plot_trajectories_by_direction(trials_for_analysis, results_dir, animal_id, date_str)
-    plt.show()
-    plt.close(fig_traj_dir)
-
-    # Interactive viewer: show all trials or just successful ones
-    print("\nShowing interactive trajectory viewer...")
-    if show_failed_in_viewer:
-        print(f"  Showing ALL {len(trials_all)} trials (including {len(failed_indices)} failed trials in RED)")
-        trials_for_viewer = trials_all
-    else:
-        print(f"  Showing only successful trials with eye data ({len(trials_successful)} trials)")
-        trials_for_viewer = trials_for_analysis
-    print("(Press SPACE to advance to next trial)")
-    interactive_trajectories(trials_for_viewer, animal_id=animal_id, session_date=date_str)
-
-    print("\nGenerating density heatmap...")
-    fig_heat = plot_density_heatmap(trials_for_analysis, results_dir, animal_id, date_str)
-    plt.show()
-    plt.close(fig_heat)
-
-    # print("\nGenerating time-to-target plot...")
-    # fig_time = plot_time_to_target(trials_for_analysis, results_dir, animal_id, date_str)
-    # plt.show()
-    # plt.close(fig_time)
-
-    # print("\nGenerating path length plot...")
-    # fig_path = plot_path_length(trials_for_analysis, results_dir, animal_id, date_str)
-    # plt.show()
-    # plt.close(fig_path)
-
-
-
-    # print("\nRunning visible vs invisible target comparison...")
-    # fig_vis, vis_stats = compare_visible_invisible_performance(trials_for_analysis, results_dir=results_dir,
-    #                                                             animal_id=animal_id,
-    #                                                             session_date=date_str)
-    # if fig_vis is not None:
-    #     plt.show()
-    #     plt.close(fig_vis)
-
-    # # NEW: Detailed visible/invisible statistics (including success/failure and direction errors)
-    # print("\nGenerating detailed visible vs invisible target statistics...")
-    # fig_vis_detailed, vis_detailed_stats = plot_visible_invisible_detailed_stats(trials_all, results_dir=results_dir,
-    #                                                                               animal_id=animal_id,
-    #                                                                               session_date=date_str)
-    # if fig_vis_detailed is not None:
-    #     plt.show()
-    #     plt.close(fig_vis_detailed)
-
-    # # NEW: Heatmaps broken down by position and visibility
-    # print("\nGenerating heatmaps by position and visibility...")
-    # fig_heatmaps = plot_heatmaps_by_position_and_visibility(trials_for_analysis, results_dir=results_dir,
-    #                                                          animal_id=animal_id,
-    #                                                          session_date=date_str)
-    # plt.show()
-    # plt.close(fig_heatmaps)
-
-    # # NEW: Test for voluntary targeted movement
-    # print("\nTesting for voluntary targeted movement...")
-    # fig_voluntary, voluntary_stats = test_voluntary_targeted_movement(trials_for_analysis, results_dir=results_dir,
-    #                                                                    animal_id=animal_id,
-    #                                                                    session_date=date_str)
-    # if fig_voluntary is not None:
-    #     plt.show()
-    #     plt.close(fig_voluntary)
-
-    # # NEW: Test for left/right targeted movement (simplified binary test)
-    # print("\nTesting for left/right targeted movement (binary classification)...")
-    # fig_lr_test, lr_test_stats = test_left_right_targeted_movement(trials_for_analysis, results_dir=results_dir,
-    #                                                                 animal_id=animal_id,
-    #                                                                 session_date=date_str)
-    # if fig_lr_test is not None:
-    #     plt.show()
-    #     plt.close(fig_lr_test)
-
-    # # NEW: Interactive initial direction viewer
-    # print("\nShowing interactive initial direction viewer...")
-    # print("  (Shows initial direction vectors for each trial - press SPACE to advance)")
-    # interactive_initial_direction_viewer(trials_for_analysis, animal_id=animal_id, session_date=date_str)
-
-    # NEW: Interactive fixation viewer
-    print("\nShowing interactive fixation viewer...")
-    print("  (Shows detected fixation periods for each trial - press SPACE to advance)")
-    interactive_fixation_viewer(trials_for_analysis, animal_id=animal_id, session_date=date_str)
-
-    print("\nPlotting final positions by target type...")
-    fig_final_pos = plot_final_positions_by_target(trials_for_analysis, min_duration=trial_min_duration, max_duration=trial_max_duration,
-                                                    results_dir=results_dir,
-                                                    animal_id=animal_id,
-                                                    session_date=date_str)
-    if fig_final_pos is not None:
-        plt.show()
-        plt.close(fig_final_pos)
-
-    # Export eye positions CSV with ITI markers
-    print("\nExporting eye positions to CSV...")
-    # Calculate ITI from target_df_all
-    if len(target_df_all) > 1:
-        time_diffs = np.diff(target_df_all['timestamp'].values)
-        min_diff = np.min(time_diffs)
-        ITI = np.floor(min_diff)
-    else:
-        ITI = 0
-    export_eye_positions_csv(trials_all, eye_df, results_dir, animal_id, date_str, ITI)
-
-    # Create summary DataFrame
-    durations = [t['duration'] for t in trials_for_analysis]
-    path_lengths = [t['path_length'] for t in trials_for_analysis]
-    efficiencies = [t['path_efficiency'] for t in trials_for_analysis]
-    dir_errors = [t['initial_direction_error'] for t in trials_for_analysis if not np.isnan(t['initial_direction_error'])]
-
-    df = pd.DataFrame({
-        'session_id': [session_id],
-        'animal_id': [animal_id],
-        'session_date': [date_str],
-        'n_trials': [len(trials_for_analysis)],
-        'mean_duration': [np.mean(durations)],
-        'median_duration': [np.median(durations)],
-        'std_duration': [np.std(durations)],
-        'min_duration': [np.min(durations)],
-        'max_duration': [np.max(durations)],
-        'mean_path_length': [np.mean(path_lengths)],
-        'median_path_length': [np.median(path_lengths)],
-        'std_path_length': [np.std(path_lengths)],
-        'mean_path_efficiency': [np.mean(efficiencies)],
-        'median_path_efficiency': [np.median(efficiencies)],
-        'mean_initial_dir_error': [np.mean(dir_errors) if dir_errors else np.nan],
-        'median_initial_dir_error': [np.median(dir_errors) if dir_errors else np.nan],
-    })
-
-    print("\n" + "="*60)
-    print("SESSION SUMMARY")
-    print("="*60)
-    print(f"Session: {session_id}")
-    print(f"Animal: {animal_id}")
-    print(f"Date: {date_str}")
-    print(f"Valid trials: {len(trials_for_analysis)}")
-
-    return df
 
 
 # Usage Examples:
