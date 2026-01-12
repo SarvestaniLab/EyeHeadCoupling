@@ -1412,6 +1412,459 @@ def plot_trial_success(eot_df: pd.DataFrame, results_dir: Optional[Path] = None,
     return fig
 
 
+def plot_psychometric_curve(eot_df: pd.DataFrame,target_df: pd.DataFrame, results_dir: Optional[Path] = None,
+                            animal_id: Optional[str] = None, session_date: str = "",
+                            session_time: Optional[str] = None) -> plt.Figure:
+    """Plot psychometric curve showing success rate as a function of target diameter.
+
+    Creates a plot with:
+    - Success rate (%) on y-axis
+    - Target diameter on x-axis
+    - Error bars showing binomial standard error
+    - Number of trials annotated for each diameter
+
+    Parameters
+    ----------
+    eot_df : pd.DataFrame
+        End-of-trial dataframe containing 'trial_success' (2=success) and 'diameter' columns
+    target_df : pd.DataFrame
+        Target dataframe containing 'diameter' column   
+    results_dir : Path, optional
+        Directory to save the figure
+    animal_id : str, optional
+        Animal identifier for filename
+    session_date : str, optional
+        Session date for title (format: YYYY-MM-DD)
+    session_time : str, optional
+        Session time for title (format: HH:MM)
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        The generated figure
+    """
+    # Check required columns
+    if 'trial_success' not in eot_df.columns:
+        print("Warning: trial_success column not found in eot_df, cannot plot psychometric curve")
+        return None
+    if 'diameter' not in target_df.columns:
+        print("Warning: diameter column not found in target_df, cannot plot psychometric curve")
+        return None
+
+    # Merge diameter from target_df into eot_df based on trial index
+    # Assuming both dataframes have the same number of rows and represent the same trials
+    if len(eot_df) != len(target_df):
+        print(f"Warning: eot_df has {len(eot_df)} rows but target_df has {len(target_df)} rows")
+        # Take the minimum length to avoid index errors
+        min_len = min(len(eot_df), len(target_df))
+        combined_df = pd.DataFrame({
+            'trial_success': eot_df['trial_success'].iloc[:min_len].values,
+            'diameter': target_df['diameter'].iloc[:min_len].values
+        })
+    else:
+        combined_df = pd.DataFrame({
+            'trial_success': eot_df['trial_success'].values,
+            'diameter': target_df['diameter'].values
+        })
+
+    # Group by diameter and calculate success rate
+    diameter_groups = combined_df.groupby('diameter')
+
+    diameters = []
+    success_rates = []
+    error_bars = []
+    n_trials_per_diameter = []
+
+    for diameter, group in diameter_groups:
+        n_trials = len(group)
+        n_success = np.sum(group['trial_success'] == 2)
+        success_rate = n_success / n_trials if n_trials > 0 else 0
+
+        # Calculate binomial standard error: sqrt(p*(1-p)/n)
+        if n_trials > 0:
+            std_error = np.sqrt(success_rate * (1 - success_rate) / n_trials)
+        else:
+            std_error = 0
+
+        diameters.append(diameter)
+        success_rates.append(success_rate * 100)  # Convert to percentage
+        error_bars.append(std_error * 100)  # Convert to percentage
+        n_trials_per_diameter.append(n_trials)
+
+    # Sort by diameter for cleaner plotting
+    sorted_indices = np.argsort(diameters)
+    diameters = np.array(diameters)[sorted_indices]
+    success_rates = np.array(success_rates)[sorted_indices]
+    error_bars = np.array(error_bars)[sorted_indices]
+    n_trials_per_diameter = np.array(n_trials_per_diameter)[sorted_indices]
+
+    # Create figure
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    # Plot psychometric curve with error bars
+    ax.errorbar(diameters, success_rates, yerr=error_bars,
+                fmt='o-', markersize=10, linewidth=2, capsize=5, capthick=2,
+                color='steelblue', ecolor='darkblue', label='Success Rate')
+
+    # Annotate number of trials for each diameter
+    for i, (d, sr, n) in enumerate(zip(diameters, success_rates, n_trials_per_diameter)):
+        # Position text above error bars
+        text_y = sr + error_bars[i] + 3
+        ax.text(d, text_y, f'n={n}', ha='center', va='bottom',
+                fontsize=10, fontweight='bold', color='darkblue')
+
+    # Add reference lines
+    ax.axhline(100, color='green', linestyle='--', alpha=0.3, linewidth=1)
+    ax.axhline(0, color='red', linestyle='--', alpha=0.3, linewidth=1)
+
+    # Labels and title
+    ax.set_xlabel('Target Diameter', fontsize=14, fontweight='bold')
+    ax.set_ylabel('Success Rate (%)', fontsize=14, fontweight='bold')
+
+    # Build title with all requested information
+    title = 'Psychometric Curve: Success Rate vs Target Diameter'
+    if animal_id:
+        title += f'\n{animal_id}'
+    if session_date:
+        # Include full date and timestamp
+        title += f' - {session_date}'
+        if session_time:
+            title += f' @ {session_time}'
+    elif session_time:
+        title += f' - {session_time}'
+
+    ax.set_title(title, fontsize=14, fontweight='bold')
+
+    # Set y-axis limits with some padding
+    ax.set_ylim(-5, 105)
+    ax.set_xlim(diameters.min() - 0.05, diameters.max() + 0.05)
+
+    # Grid and legend
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc='best', fontsize=11)
+
+    plt.tight_layout()
+
+    # Save figure if results directory provided
+    if results_dir:
+        results_dir.mkdir(parents=True, exist_ok=True)
+        prefix = f"{animal_id}_" if animal_id else ""
+        date_suffix = f"_{session_date}" if session_date else ""
+        filename = f"{prefix}psychometric_curve{date_suffix}.png"
+        fig.savefig(results_dir / filename, dpi=150, bbox_inches='tight')
+        print(f"Saved psychometric curve to {results_dir / filename}")
+
+    return fig
+
+
+def plot_trajectories_by_diameter(trials: list[dict], results_dir: Optional[Path] = None,
+                                  animal_id: Optional[str] = None, session_date: str = "",
+                                  session_time: Optional[str] = None,
+                                  min_fixation_duration: float = 0.45,
+                                  max_fixation_movement: float = 0.15,
+                                  eye_df: Optional[pd.DataFrame] = None) -> plt.Figure:
+    """Plot fixation points grouped by target diameter.
+    
+    Creates a figure with subplots, one for each unique target diameter.
+    Each subplot shows fixation points with successful trials in green and failed trials in red.
+    
+    Parameters
+    ----------
+    trials : list of dict
+        List of trial data dictionaries containing eye trajectories
+    results_dir : Path, optional
+        Directory to save the figure
+    animal_id : str, optional
+        Animal identifier for filename
+    session_date : str, optional
+        Session date for title (format: YYYY-MM-DD)
+    session_time : str, optional
+        Session time for title (format: HH:MM)
+    min_fixation_duration : float
+        Minimum fixation duration in seconds (default: 0.45)
+    max_fixation_movement : float
+        Maximum movement threshold for fixation (default: 0.15)
+    eye_df : pd.DataFrame, optional
+        Complete eye tracking dataframe with fixation data (including inter-trial intervals)
+    
+    Returns
+    -------
+    matplotlib.figure.Figure
+        The generated figure
+    """
+    # Group trials by diameter
+    diameter_trials = {}
+    for trial in trials:
+        if not trial.get('has_eye_data', False):
+            continue
+        
+        diameter = trial.get('target_diameter', None)
+        if diameter is None:
+            continue
+            
+        if diameter not in diameter_trials:
+            diameter_trials[diameter] = []
+        
+        diameter_trials[diameter].append(trial)
+    
+    if len(diameter_trials) == 0:
+        print("Warning: No trials with eye data and diameter information found")
+        return None
+    
+    # Sort diameters for consistent plotting
+    sorted_diameters = sorted(diameter_trials.keys())
+    n_diameters = len(sorted_diameters)
+    
+    # Create subplots - arrange in a grid
+    n_cols = min(3, n_diameters)  # Max 3 columns
+    n_rows = int(np.ceil(n_diameters / n_cols))
+    
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(6*n_cols, 5*n_rows))
+    
+    # Make axes always iterable
+    if n_diameters == 1:
+        axes = np.array([axes])
+    axes = axes.flatten()
+    
+    # Collect variance data for separate plot
+    variance_data = {'diameters': [], 'variances': [], 'percent_correct': [], 'iti_variances': []}
+    
+    # Plot fixations for each diameter
+    for idx, diameter in enumerate(sorted_diameters):
+        ax = axes[idx]
+        trial_list = diameter_trials[diameter]
+        
+        n_success = 0
+        n_failed = 0
+        target_x = None
+        target_y = None
+
+        # Store all centerpoints for variance calculation
+        all_centerpoints = []
+        iti_centerpoints = []
+
+        # Collect fixation points from all trials
+        for trial in trial_list:
+            eye_x = np.array(trial['eye_x'])
+            eye_y = np.array(trial['eye_y'])
+            eye_times = np.array(trial.get('eye_times', np.arange(len(eye_x))))
+            
+            if target_x is None:
+                target_x = trial['target_x']
+                target_y = trial['target_y']
+            
+            is_failed = trial.get('trial_failed', False)
+            
+            if is_failed:
+                n_failed += 1
+                color = 'red'
+                marker = 'x'
+            else:
+                n_success += 1
+                color = 'green'
+                marker = 'o'
+            
+            # Detect fixations
+            fixations = detect_fixations(eye_x, eye_y, eye_times, 
+                                        min_fixation_duration, max_fixation_movement)
+            
+            # Plot only the last fixation
+            if len(fixations) > 0:
+                start, end, duration, span = fixations[-1]  # Get last fixation
+                fix_x = eye_x[start:end]
+                fix_y = eye_y[start:end]
+                ax.plot(fix_x, fix_y, marker, color=color, markersize=6, alpha=0.8)
+            
+                # Calculate centerpoint of this fixation
+                centerpoint_x = np.mean(fix_x)
+                centerpoint_y = np.mean(fix_y)
+
+                # Store centerpoint
+                all_centerpoints.append([centerpoint_x, centerpoint_y])
+            
+            # # Plot inter-trial fixations in purple (if eye_df is provided)
+            # if eye_df is not None and 'in_fixation' in eye_df.columns:
+            #     trial_num = trial['trial_number']
+                
+            #     # Find the previous trial end frame (ITI before this trial)
+            #     prev_trial_idx = next((i for i, t in enumerate(trials) if t['trial_number'] == trial_num - 1), None)
+            #     if prev_trial_idx is not None:
+            #         prev_end_frame = trials[prev_trial_idx]['end_frame']
+            #         start_frame = trial['start_frame']
+                    
+            #         # Extract inter-trial fixations (frames between previous trial's end and this trial's start)
+            #         iti_mask = (eye_df['frame'] > prev_end_frame) & (eye_df['frame'] < start_frame) & (eye_df['in_fixation'] == True)
+            #         iti_fixations = eye_df[iti_mask]
+                    
+
+            #         if len(iti_fixations) > 0:
+            #             # Get only the first fixation (minimum fixation_id)
+            #             first_fixation_id = iti_fixations['fixation_id'].min()
+            #             iti_fixations = iti_fixations[iti_fixations['fixation_id'] == first_fixation_id]
+                        
+            #             # Plot the first inter-trial fixation in purple
+            #             ax.plot(iti_fixations['eye_x'].values, iti_fixations['eye_y'].values, 
+            #                 'o', color='purple', markersize=6, alpha=0.4)
+                        
+            #             # Calculate centerpoint of this first ITI fixation
+            #             iti_center_x = np.mean(iti_fixations['eye_x'].values)
+            #             iti_center_y = np.mean(iti_fixations['eye_y'].values)
+            #             iti_centerpoints.append([iti_center_x, iti_center_y])
+
+                    # if len(iti_fixations) > 0:
+                    #     # Plot all inter-trial fixation points in purple
+                    #     ax.plot(iti_fixations['eye_x'].values, iti_fixations['eye_y'].values, 
+                    #         'o', color='purple', markersize=6, alpha=0.04)
+                        
+                    #     # Calculate centerpoint of each ITI fixation and store
+                    #     # Group consecutive fixation frames by fixation_id
+                    #     for fix_id in iti_fixations['fixation_id'].unique():
+                    #         fix_mask = iti_fixations['fixation_id'] == fix_id
+                    #         fix_data = iti_fixations[fix_mask]
+                    #         iti_center_x = np.mean(fix_data['eye_x'].values)
+                    #         iti_center_y = np.mean(fix_data['eye_y'].values)
+                    #         iti_centerpoints.append([iti_center_x, iti_center_y])
+        
+        # Calculate variance of all centerpoints as sum of x and y variances
+        if len(all_centerpoints) > 0:
+            all_centerpoints_arr = np.array(all_centerpoints)
+            var_x = np.var(all_centerpoints_arr[:, 0])
+            var_y = np.var(all_centerpoints_arr[:, 1])
+            centerpoint_var = var_x + var_y
+        else:
+            centerpoint_var = np.nan
+        
+        # Calculate variance of inter-trial centerpoints
+        if len(iti_centerpoints) > 0:
+            iti_centerpoints_arr = np.array(iti_centerpoints)
+            iti_var_x = np.var(iti_centerpoints_arr[:, 0])
+            iti_var_y = np.var(iti_centerpoints_arr[:, 1])
+            iti_var = iti_var_x + iti_var_y
+        else:
+            iti_var = np.nan
+
+        # Store data for variance plot
+        variance_data['diameters'].append(diameter)
+        variance_data['variances'].append(centerpoint_var)
+        variance_data['iti_variances'].append(iti_var)
+        pct_correct = (n_success / (n_success + n_failed)) * 100 if (n_success + n_failed) > 0 else 0
+        variance_data['percent_correct'].append(pct_correct)
+
+        # Draw target circle
+        circle = Circle((target_x, target_y), diameter/2, 
+                   fill=False, edgecolor='blue', linewidth=2.5, linestyle='--')
+        ax.add_patch(circle)
+        
+        # Mark target center
+        ax.plot(target_x, target_y, 'b+', markersize=15, markeredgewidth=3)
+        
+        # Set axis limits
+        ax.set_xlim(-1.7, 1.7)
+        ax.set_ylim(-1, 1)
+        ax.set_aspect('equal')
+        
+        # Labels and title
+        ax.set_xlabel('X Position', fontsize=10)
+        ax.set_ylabel('Y Position', fontsize=10)
+
+        # Build title WITHOUT variance information
+        title_text = f'Diameter: {diameter:.3f}\n(n={n_success+n_failed}: {n_success} success, {n_failed} failed)'
+        
+        ax.set_title(title_text, fontsize=11, fontweight='bold')
+        ax.grid(True, alpha=0.3)
+        
+        # Add legend to first subplot only
+        if idx == 0:
+            from matplotlib.lines import Line2D
+            legend_elements = [
+                Line2D([0], [0], marker='o', color='w', markerfacecolor='green', 
+                    markersize=8, label='Success fixations'),
+                Line2D([0], [0], marker='x', color='red', markersize=8, 
+                    linewidth=2, label='Failed fixations'),
+                Line2D([0], [0], marker='o', color='w', markerfacecolor='purple', 
+                    markersize=8, label='Inter-trial fixations'),
+                Line2D([0], [0], color='blue', linewidth=2, linestyle='--', label='Target')
+            ]
+            ax.legend(handles=legend_elements, loc='upper right', fontsize=9)
+    
+    # Hide extra subplots if we have more subplots than diameters
+    for idx in range(n_diameters, len(axes)):
+        axes[idx].set_visible(False)
+    
+    # Overall title
+    title = 'Fixation Points by Target Diameter'
+    if animal_id:
+        title += f'\n{animal_id}'
+    if session_date:
+        title += f' - {session_date}'
+        if session_time:
+            title += f' @ {session_time}'
+    elif session_time:
+        title += f' - {session_time}'
+    
+    fig.suptitle(title, fontsize=14, fontweight='bold')
+    plt.tight_layout()
+    
+    # Save figure if results directory provided
+    if results_dir:
+        results_dir.mkdir(parents=True, exist_ok=True)
+        prefix = f"{animal_id}_" if animal_id else ""
+        date_suffix = f"_{session_date}" if session_date else ""
+        filename = f"{prefix}fixations_by_diameter{date_suffix}.png"
+        fig.savefig(results_dir / filename, dpi=150, bbox_inches='tight')
+        print(f"Saved fixations by diameter to {results_dir / filename}")
+    
+    # Create variance vs diameter plot
+    fig_var, ax_var = plt.subplots(figsize=(10, 7))
+    
+    # Plot trial fixation variance (solid blue line)
+    ax_var.plot(variance_data['diameters'], variance_data['variances'], 'o-', 
+                linewidth=2, markersize=10, color='steelblue', 
+                markerfacecolor='lightblue', markeredgecolor='steelblue', 
+                markeredgewidth=2, label='Trial fixations')
+    
+    # Plot inter-trial fixation variance (dashed purple line)
+    valid_iti = [(d, v) for d, v in zip(variance_data['diameters'], variance_data['iti_variances']) if not np.isnan(v)]
+    if valid_iti:
+        iti_diameters, iti_variances = zip(*valid_iti)
+        ax_var.plot(iti_diameters, iti_variances, 'o--', 
+                    linewidth=2, markersize=10, color='purple', 
+                    markerfacecolor='lavender', markeredgecolor='purple', 
+                    markeredgewidth=2, label='Inter-trial fixations')
+    
+    # Add % correct labels
+    for d, v, pct in zip(variance_data['diameters'], variance_data['variances'], variance_data['percent_correct']):
+        if not np.isnan(v):
+            ax_var.annotate(f'{pct:.1f}%', xy=(d, v), xytext=(0, 10), textcoords='offset points',
+                            ha='center', fontsize=10, fontweight='bold',
+                            bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.7))
+    
+    ax_var.set_xlabel('Target Diameter', fontsize=12, fontweight='bold')
+    ax_var.set_ylabel('Fixation Centerpoint Variance (Var(X) + Var(Y))', fontsize=12, fontweight='bold')
+    var_title = 'Fixation Centerpoint Variance vs Target Diameter'
+    if animal_id:
+        var_title += f'\n{animal_id}'
+    if session_date:
+        var_title += f' - {session_date}'
+        if session_time:
+            var_title += f' @ {session_time}'
+    elif session_time:
+        var_title += f' - {session_time}'
+    ax_var.set_title(var_title, fontsize=14, fontweight='bold')
+    ax_var.grid(True, alpha=0.3)
+    ax_var.legend(loc='best', fontsize=11)
+    
+    if results_dir:
+        filename_var = f"{prefix}fixation_variance_by_diameter{date_suffix}.png"
+        fig_var.savefig(results_dir / filename_var, dpi=150, bbox_inches='tight')
+        print(f"Saved fixation variance by diameter to {results_dir / filename_var}")
+    
+    return fig
+
+
+
+
+
 def plot_path_length(trials: list[dict], results_dir: Optional[Path] = None,
                      animal_id: Optional[str] = None, session_date: str = "") -> plt.Figure:
     """Plot trajectory path length by trial.
@@ -2566,7 +3019,7 @@ def plot_visible_invisible_detailed_stats(trials: list[dict], results_dir: Optio
 
 # Fixation detection parameters - shared across analysis functions
 FIXATION_MIN_DURATION = 0.65  # seconds
-FIXATION_MAX_MOVEMENT = 0.1  # stimulus units
+FIXATION_MAX_MOVEMENT = 0.2  # stimulus units
 def interactive_fixation_viewer(trials: list[dict], animal_id: Optional[str] = None,
                                  session_date: str = "", 
                                  min_duration: float = FIXATION_MIN_DURATION,
@@ -3694,6 +4147,31 @@ def analyze_folder(folder_path: str | Path, results_dir: Optional[str | Path] = 
             plt.show()
         plt.close(fig_success)
 
+
+    
+    # NEW: Create vstim_go_fixation CSV (single source of truth for fixation detection)
+    vstim_go_fixation_df = create_vstim_go_fixation_csv(folder_path, results_dir=results_dir,
+                                                         animal_id=animal_id,
+                                                         session_date=date_str)
+
+    # Plot psychometric curve (success rate vs target diameter)
+    print("\nGenerating psychometric curve...")
+    fig_psychometric = plot_psychometric_curve(eot_df, target_df_all, results_dir, animal_id, date_str, session_time=session_time)
+    if fig_psychometric is not None:
+        if show_plots:
+            plt.show()
+        plt.close(fig_psychometric)
+
+    # Plot trajectories grouped by target diameter
+    print("\nGenerating trajectories by diameter plot...")
+    fig_traj_diam = plot_trajectories_by_diameter(trials_all, results_dir, animal_id, date_str, session_time=session_time, eye_df=vstim_go_fixation_df)
+
+
+    if fig_traj_diam is not None:
+        if show_plots:
+            plt.show()
+        plt.close(fig_traj_diam)
+
     print("\nRunning left vs right target comparison...")
     # Note: Always use trials_all for success/failure stats, regardless of --include-failed-trials flag
     # Auto-detect left and right target positions from the data
@@ -3780,10 +4258,6 @@ def analyze_folder(folder_path: str | Path, results_dir: Optional[str | Path] = 
     if show_plots:
         interactive_fixation_viewer(trials_for_analysis, animal_id=animal_id, session_date=date_str)
 
-    # NEW: Create vstim_go_fixation CSV (single source of truth for fixation detection)
-    vstim_go_fixation_df = create_vstim_go_fixation_csv(folder_path, results_dir=results_dir,
-                                                         animal_id=animal_id,
-                                                         session_date=date_str)
 
     # NEW: Save detailed fixation data (uses vstim_go_fixation_df for consistency)
     print("\nSaving detailed fixation data...")
