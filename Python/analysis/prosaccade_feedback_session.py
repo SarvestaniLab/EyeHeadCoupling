@@ -29,6 +29,10 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 from utils.session_loader import load_session
 from eyehead.io import clean_csv
 
+# Fixation detection parameters - shared across analysis functions
+FIXATION_MIN_DURATION = 0.7  # seconds
+FIXATION_MAX_MOVEMENT = 0.2  # stimulus units
+
 
 def load_feedback_data(folder_path: Path, animal_id: str = "Tsh001") -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Load the three CSV files for saccade feedback analysis.
@@ -469,32 +473,66 @@ def extract_trial_trajectories(eot_df: pd.DataFrame, eye_df: pd.DataFrame,
             # Calculate straight-line distance from start to target
             straight_line_distance = np.sqrt((target_x - start_eye_x)**2 + (target_y - start_eye_y)**2)
 
+            # Check if eye is already in target at trial start
+            # If so, exclude from path efficiency calculation
+            target_radius = target_diameter / 2.0
+            cursor_radius = cursor_diameter / 2.0
+            contact_threshold = target_radius + cursor_radius
+            distance_to_target_at_start = np.sqrt((target_x - start_eye_x)**2 + (target_y - start_eye_y)**2)
+            eye_already_in_target = distance_to_target_at_start <= contact_threshold
+
             # Path efficiency: ratio of straight-line to actual path (closer to 1.0 is more efficient)
-            if path_length > 0:
+            # Set to NaN if eye already in target at start
+            if eye_already_in_target:
+                path_efficiency = np.nan
+            elif path_length > 0:
                 path_efficiency = straight_line_distance / path_length
             else:
                 path_efficiency = 0.0
 
             # Initial movement direction: angle between initial movement and ideal vector
-            # Use first 5 samples (or fewer if trial is short) to determine initial direction
-            n_samples = min(5, len(eye_trajectory))
-            initial_dx = eye_trajectory['green_x'].values[n_samples-1] - start_eye_x
-            initial_dy = eye_trajectory['green_y'].values[n_samples-1] - start_eye_y
+            # Get eye position data for this trial
+            # First 100ms: start_time to start_time + 0.1
+            # 200-300ms: start_time + 0.2 to start_time + 0.3
 
-            # Ideal vector from start to target
-            ideal_dx = target_x - start_eye_x
-            ideal_dy = target_y - start_eye_y
+            eye_early = eye_trajectory[(eye_trajectory['timestamp'] >= start_time) &
+                                       (eye_trajectory['timestamp'] < start_time + 0.1)]
 
-            # Calculate angle between vectors using dot product
-            # angle = arccos(dot(v1, v2) / (|v1| * |v2|))
-            initial_mag = np.sqrt(initial_dx**2 + initial_dy**2)
-            ideal_mag = np.sqrt(ideal_dx**2 + ideal_dy**2)
+            eye_at_250ms = eye_trajectory[(eye_trajectory['timestamp'] >= start_time + 0.2) &
+                                          (eye_trajectory['timestamp'] < start_time + 0.3)]
 
-            if initial_mag > 0 and ideal_mag > 0:
-                cos_angle = (initial_dx * ideal_dx + initial_dy * initial_dy) / (initial_mag * ideal_mag)
-                # Clamp to [-1, 1] to avoid numerical errors
-                cos_angle = np.clip(cos_angle, -1.0, 1.0)
-                initial_direction_error = np.degrees(np.arccos(cos_angle))
+            # Check if we have enough data
+            if len(eye_early) > 0 and len(eye_at_250ms) > 0:
+                # Average position over first 100ms (starting position)
+                early_x = eye_early['green_x'].mean()
+                early_y = eye_early['green_y'].mean()
+
+                # Average position over 200-300ms window
+                later_x = eye_at_250ms['green_x'].mean()
+                later_y = eye_at_250ms['green_y'].mean()
+
+                # Calculate movement vector
+                move_dx = later_x - early_x
+                move_dy = later_y - early_y
+                movement_magnitude = np.sqrt(move_dx**2 + move_dy**2)
+
+                # Calculate angle of movement (in radians, then degrees)
+                move_angle_rad = np.arctan2(move_dy, move_dx)
+                move_angle_deg = np.degrees(move_angle_rad)
+
+                # Calculate target direction from starting position
+                target_dx = target_x - early_x
+                target_dy = target_y - early_y
+                target_angle_rad = np.arctan2(target_dy, target_dx)
+                target_angle_deg = np.degrees(target_angle_rad)
+
+                # Calculate angular difference
+                # Use circular difference to keep it in [-180, 180]
+                angle_diff = move_angle_deg - target_angle_deg
+                # Normalize to [-180, 180]
+                angle_diff = ((angle_diff + 180) % 360) - 180
+
+                initial_direction_error = angle_diff
             else:
                 initial_direction_error = np.nan
         elif has_eye_data:
@@ -576,10 +614,15 @@ def extract_trial_trajectories(eot_df: pd.DataFrame, eye_df: pd.DataFrame,
         print(f"    Median: {np.median(path_lengths):.3f}")
         print(f"    Range: {np.min(path_lengths):.3f} - {np.max(path_lengths):.3f}")
 
-        efficiencies = [t['path_efficiency'] for t in trials]
+        efficiencies = [t['path_efficiency'] for t in trials if not np.isnan(t['path_efficiency']) and t['path_efficiency'] <= 1.0]
         print(f"\n  Path efficiency statistics (1.0 = perfectly direct):")
-        print(f"    Mean: {np.mean(efficiencies):.3f}")
-        print(f"    Median: {np.median(efficiencies):.3f}")
+        print(f"    (Excluding: trials where eye starts in target, and efficiency > 1.0)")
+        if efficiencies:
+            print(f"    Mean: {np.mean(efficiencies):.3f}")
+            print(f"    Median: {np.median(efficiencies):.3f}")
+            print(f"    n: {len(efficiencies)}/{len(trials)}")
+        else:
+            print(f"    No valid efficiency data")
 
         dir_errors = [t['initial_direction_error'] for t in trials if not np.isnan(t['initial_direction_error'])]
         if dir_errors:
@@ -588,6 +631,118 @@ def extract_trial_trajectories(eot_df: pd.DataFrame, eye_df: pd.DataFrame,
             print(f"    Median: {np.median(dir_errors):.1f}°")
 
     return trials
+
+
+# ============================================================================
+# ITI (Inter-Trial Interval) Direction Error Analysis
+# This section can be easily removed if no longer needed
+# ============================================================================
+
+def calculate_iti_direction_errors(trials: list[dict], eye_df: pd.DataFrame) -> list[dict]:
+    """Calculate initial direction error during ITI periods.
+
+    For each trial (except the first), analyzes the ITI period between the
+    previous trial end and current trial start, calculating whether the eye
+    is already moving toward where the upcoming target will appear.
+
+    Parameters
+    ----------
+    trials : list of dict
+        List of trial data from extract_trial_trajectories
+    eye_df : pd.DataFrame
+        Eye tracking data with columns: timestamp, green_x, green_y, frame
+
+    Returns
+    -------
+    list of dict
+        List of ITI analysis results, one per trial (excluding first trial)
+        Each dict contains: trial_number, target_x, target_y, target_diameter,
+        iti_direction_error, iti_start_time, iti_end_time
+    """
+    iti_results = []
+
+    # Skip first trial since it has no ITI before it
+    for i in range(1, len(trials)):
+        current_trial = trials[i]
+        previous_trial = trials[i-1]
+
+        # ITI period: from previous trial end to current trial start
+        iti_start = previous_trial.get('end_time', np.nan)
+        iti_end = current_trial.get('start_time', np.nan)
+
+        if np.isnan(iti_start) or np.isnan(iti_end):
+            continue
+
+        # Get target info for upcoming (current) trial
+        target_x = current_trial.get('target_x', np.nan)
+        target_y = current_trial.get('target_y', np.nan)
+        target_diameter = current_trial.get('target_diameter', np.nan)
+
+        if np.isnan(target_x) or np.isnan(target_y):
+            continue
+
+        # Extract eye trajectory during ITI period
+        iti_mask = (eye_df['timestamp'] >= iti_start) & (eye_df['timestamp'] < iti_end)
+        iti_trajectory = eye_df[iti_mask].dropna(subset=['green_x', 'green_y', 'timestamp'])
+
+        if len(iti_trajectory) == 0:
+            continue
+
+        # Calculate direction error using same approach as trial direction error
+        # First 100ms: iti_start to iti_start + 0.1
+        # 200-300ms: iti_start + 0.2 to iti_start + 0.3
+
+        eye_early = iti_trajectory[(iti_trajectory['timestamp'] >= iti_start) &
+                                   (iti_trajectory['timestamp'] < iti_start + 0.1)]
+
+        eye_at_250ms = iti_trajectory[(iti_trajectory['timestamp'] >= iti_start + 0.2) &
+                                      (iti_trajectory['timestamp'] < iti_start + 0.3)]
+
+        # Check if we have enough data
+        if len(eye_early) == 0 or len(eye_at_250ms) == 0:
+            iti_direction_error = np.nan
+        else:
+            # Average position over first 100ms (starting position)
+            early_x = eye_early['green_x'].mean()
+            early_y = eye_early['green_y'].mean()
+
+            # Average position over 200-300ms window
+            later_x = eye_at_250ms['green_x'].mean()
+            later_y = eye_at_250ms['green_y'].mean()
+
+            # Calculate movement vector
+            move_dx = later_x - early_x
+            move_dy = later_y - early_y
+
+            # Calculate angle of movement (in radians, then degrees)
+            move_angle_rad = np.arctan2(move_dy, move_dx)
+            move_angle_deg = np.degrees(move_angle_rad)
+
+            # Calculate target direction from starting position
+            target_dx = target_x - early_x
+            target_dy = target_y - early_y
+            target_angle_rad = np.arctan2(target_dy, target_dx)
+            target_angle_deg = np.degrees(target_angle_rad)
+
+            # Calculate angular difference
+            # Use circular difference to keep it in [-180, 180]
+            angle_diff = move_angle_deg - target_angle_deg
+            # Normalize to [-180, 180]
+            angle_diff = ((angle_diff + 180) % 360) - 180
+
+            iti_direction_error = angle_diff
+
+        iti_results.append({
+            'trial_number': current_trial.get('trial_number', i+1),
+            'target_x': target_x,
+            'target_y': target_y,
+            'target_diameter': target_diameter,
+            'iti_direction_error': iti_direction_error,
+            'iti_start_time': iti_start,
+            'iti_end_time': iti_end,
+        })
+
+    return iti_results
 
 
 def interactive_trajectories(trials: list[dict], animal_id: Optional[str] = None,
@@ -955,8 +1110,8 @@ def plot_time_to_target(trials: list[dict], results_dir: Optional[Path] = None,
 
 
 def detect_fixations(eye_x: np.ndarray, eye_y: np.ndarray, eye_times: np.ndarray,
-                     min_fixation_duration: float = 0.65,
-                     max_movement: float = 0.1) -> list[tuple]:
+                     min_fixation_duration: float = FIXATION_MIN_DURATION,
+                     max_movement: float = FIXATION_MAX_MOVEMENT) -> list[tuple]:
     """Detect fixation windows based on frame-to-frame movement velocity.
 
     A fixation is a period where consecutive frame-to-frame movements are below
@@ -971,7 +1126,7 @@ def detect_fixations(eye_x: np.ndarray, eye_y: np.ndarray, eye_times: np.ndarray
     eye_times : np.ndarray
         Timestamps for each position
     min_fixation_duration : float
-        Minimum duration (seconds) for a valid fixation (default: 0.65)
+        Minimum duration (seconds) for a valid fixation (default: 0.7)
     max_movement : float
         Maximum frame-to-frame movement for fixation (default: 0.1 units)
 
@@ -1033,8 +1188,8 @@ def calculate_trial_success_from_fixations(eye_x: np.ndarray, eye_y: np.ndarray,
                                           eye_times: np.ndarray,
                                           target_x: float, target_y: float,
                                           contact_threshold: float,
-                                          min_fixation_duration: float = 0.65,
-                                          max_movement: float = 0.1) -> tuple[bool, float]:
+                                          min_fixation_duration: float = FIXATION_MIN_DURATION,
+                                          max_movement: float = FIXATION_MAX_MOVEMENT) -> tuple[bool, float]:
     """Determine trial success based on the last fixation.
 
     Success criterion:
@@ -1057,7 +1212,7 @@ def calculate_trial_success_from_fixations(eye_x: np.ndarray, eye_y: np.ndarray,
     contact_threshold : float
         Distance threshold for being "on target" (target_radius + cursor_radius)
     min_fixation_duration : float
-        Minimum fixation duration for success (default: 0.65s)
+        Minimum fixation duration for success (default: 0.7s)
     max_movement : float
         Maximum movement for fixation detection (default: 0.1 units)
 
@@ -1096,8 +1251,8 @@ def calculate_trial_success_from_fixations(eye_x: np.ndarray, eye_y: np.ndarray,
 
 def calculate_chance_level(trials: list[dict], n_shuffles: int = 1000,
                            target_filter: Optional[callable] = None,
-                           min_fixation_duration: float = 0.65,
-                           max_movement: float = 0.1,
+                           min_fixation_duration: float = FIXATION_MIN_DURATION,
+                           max_movement: float = FIXATION_MAX_MOVEMENT,
                            results_dir: Optional[Path] = None) -> float:
     """Calculate chance level by matching actual fixation positions against shuffled targets.
 
@@ -1120,7 +1275,7 @@ def calculate_chance_level(trials: list[dict], n_shuffles: int = 1000,
     target_filter : callable, optional
         Optional function to filter which trials to include
     min_fixation_duration : float
-        Minimum fixation duration (default: 0.65 seconds)
+        Minimum fixation duration (default: 0.7 seconds)
     max_movement : float
         Maximum movement for fixation detection (default: 0.1 units)
     results_dir : Path, optional
@@ -1255,9 +1410,680 @@ def calculate_chance_level(trials: list[dict], n_shuffles: int = 1000,
     return np.mean(success_rates)
 
 
+def compute_movement_statistics(trials: list[dict]) -> Tuple[np.ndarray, np.ndarray]:
+    """Compute velocities and turning angles from eye movement trajectories.
+
+    Extracts empirical distributions of:
+    - Velocity: distance / time between consecutive samples
+    - Turning angle: change in movement direction between consecutive segments
+
+    Parameters
+    ----------
+    trials : list of dict
+        List of trial dictionaries containing eye trajectory data
+
+    Returns
+    -------
+    tuple of (velocities, turning_angles)
+        velocities : np.ndarray
+            Array of velocity samples (units/second)
+        turning_angles : np.ndarray
+            Array of turning angle samples (radians, wrapped to [-pi, pi])
+    """
+    velocities = []
+    turning_angles = []
+
+    for trial in trials:
+        if not trial.get('has_eye_data', False):
+            continue
+
+        eye_x = np.array(trial.get('eye_x', []))
+        eye_y = np.array(trial.get('eye_y', []))
+        eye_times = np.array(trial.get('eye_times', []))
+
+        if len(eye_x) < 3:
+            continue
+
+        # Compute velocities
+        dx = np.diff(eye_x)
+        dy = np.diff(eye_y)
+        dt = np.diff(eye_times)
+
+        # Avoid division by zero
+        valid_dt = dt > 0
+        distances = np.sqrt(dx**2 + dy**2)
+        trial_velocities = distances[valid_dt] / dt[valid_dt]
+        velocities.extend(trial_velocities)
+
+        # Compute turning angles (change in direction between consecutive movements)
+        # Direction of each movement segment
+        angles = np.arctan2(dy[valid_dt], dx[valid_dt])
+
+        # Change in angle between consecutive segments
+        angle_diffs = np.diff(angles)
+
+        # Wrap to [-pi, pi]
+        angle_diffs = np.arctan2(np.sin(angle_diffs), np.cos(angle_diffs))
+
+        turning_angles.extend(angle_diffs)
+
+    return np.array(velocities), np.array(turning_angles)
+
+
+def compute_movement_statistics_with_states(trials: list[dict],
+                                            velocity_threshold: float = 2.0) -> dict:
+    """Compute movement statistics separated by fixation/saccade states using Markov model.
+
+    Classifies each movement segment as either 'fixation' (low velocity) or 'saccade' (high velocity),
+    then computes:
+    - State-specific velocity and turning angle distributions
+    - State transition probabilities for Markov model
+    - State duration distributions
+
+    Parameters
+    ----------
+    trials : list of dict
+        List of trial dictionaries containing eye trajectory data
+    velocity_threshold : float
+        Velocity threshold (units/second) to distinguish fixation from saccade (default: 2.0)
+
+    Returns
+    -------
+    dict
+        Dictionary containing:
+        - 'fixation_velocities': np.ndarray of velocities during fixation
+        - 'fixation_angles': np.ndarray of turning angles during fixation
+        - 'fixation_vx': np.ndarray of x-velocity components during fixation
+        - 'fixation_vy': np.ndarray of y-velocity components during fixation
+        - 'saccade_velocities': np.ndarray of velocities during saccade
+        - 'saccade_angles': np.ndarray of turning angles during saccade
+        - 'saccade_vx': np.ndarray of x-velocity components during saccade
+        - 'saccade_vy': np.ndarray of y-velocity components during saccade
+        - 'transition_probs': dict with 'fix_to_fix', 'fix_to_sac', 'sac_to_fix', 'sac_to_sac'
+        - 'initial_state_probs': dict with 'fixation' and 'saccade' probabilities
+        - 'fixation_durations': np.ndarray of fixation state durations
+        - 'saccade_durations': np.ndarray of saccade state durations
+        - 'x_bounds': tuple of (min_x, max_x) from empirical data
+        - 'y_bounds': tuple of (min_y, max_y) from empirical data
+    """
+    fixation_velocities = []
+    fixation_angles = []
+    saccade_velocities = []
+    saccade_angles = []
+
+    # Track directional velocity components (dx/dt and dy/dt) separately
+    fixation_vx = []  # x-component of velocity during fixation
+    fixation_vy = []  # y-component of velocity during fixation
+    saccade_vx = []   # x-component of velocity during saccade
+    saccade_vy = []   # y-component of velocity during saccade
+
+    # Track state transitions
+    transitions = {'fix_to_fix': 0, 'fix_to_sac': 0, 'sac_to_fix': 0, 'sac_to_sac': 0}
+    initial_states = {'fixation': 0, 'saccade': 0}
+
+    # Track state durations (in number of segments)
+    fixation_durations = []
+    saccade_durations = []
+
+    # Track position bounds for random walk constraints
+    all_x_positions = []
+    all_y_positions = []
+
+    for trial in trials:
+        if not trial.get('has_eye_data', False):
+            continue
+
+        eye_x = np.array(trial.get('eye_x', []))
+        eye_y = np.array(trial.get('eye_y', []))
+        eye_times = np.array(trial.get('eye_times', []))
+
+        if len(eye_x) < 3:
+            continue
+
+        # Collect positions for computing bounds
+        all_x_positions.extend(eye_x)
+        all_y_positions.extend(eye_y)
+
+        # Compute velocities
+        dx = np.diff(eye_x)
+        dy = np.diff(eye_y)
+        dt = np.diff(eye_times)
+
+        valid_dt = dt > 0
+        distances = np.sqrt(dx**2 + dy**2)
+        velocities = distances[valid_dt] / dt[valid_dt]
+
+        # Compute directional velocity components
+        vx = dx[valid_dt] / dt[valid_dt]  # x-component of velocity
+        vy = dy[valid_dt] / dt[valid_dt]  # y-component of velocity
+
+        if len(velocities) < 2:
+            continue
+
+        # Classify states based on velocity threshold (total speed)
+        states = ['fixation' if v < velocity_threshold else 'saccade' for v in velocities]
+
+        # Record initial state
+        initial_states[states[0]] += 1
+
+        # Compute turning angles for valid segments
+        angles = np.arctan2(dy[valid_dt], dx[valid_dt])
+        angle_diffs = np.diff(angles)
+        angle_diffs = np.arctan2(np.sin(angle_diffs), np.cos(angle_diffs))
+
+        # Separate velocities, velocity components, and angles by state
+        # Note: angle_diffs has length len(velocities)-1
+        for i, state in enumerate(states):
+            if state == 'fixation':
+                fixation_velocities.append(velocities[i])
+                fixation_vx.append(vx[i])
+                fixation_vy.append(vy[i])
+                if i < len(angle_diffs):
+                    fixation_angles.append(angle_diffs[i])
+            else:
+                saccade_velocities.append(velocities[i])
+                saccade_vx.append(vx[i])
+                saccade_vy.append(vy[i])
+                if i < len(angle_diffs):
+                    saccade_angles.append(angle_diffs[i])
+
+        # Count state transitions
+        current_state = states[0]
+        current_duration = 1
+
+        for i in range(1, len(states)):
+            if states[i] == current_state:
+                # Stay in same state
+                current_duration += 1
+                if current_state == 'fixation':
+                    transitions['fix_to_fix'] += 1
+                else:
+                    transitions['sac_to_sac'] += 1
+            else:
+                # Transition to different state
+                # Record duration of previous state
+                if current_state == 'fixation':
+                    fixation_durations.append(current_duration)
+                    transitions['fix_to_sac'] += 1
+                else:
+                    saccade_durations.append(current_duration)
+                    transitions['sac_to_fix'] += 1
+
+                current_state = states[i]
+                current_duration = 1
+
+        # Record final state duration
+        if current_state == 'fixation':
+            fixation_durations.append(current_duration)
+        else:
+            saccade_durations.append(current_duration)
+
+    # Calculate transition probabilities
+    total_fix_transitions = transitions['fix_to_fix'] + transitions['fix_to_sac']
+    total_sac_transitions = transitions['sac_to_sac'] + transitions['sac_to_fix']
+
+    transition_probs = {
+        'fix_to_fix': transitions['fix_to_fix'] / total_fix_transitions if total_fix_transitions > 0 else 0.5,
+        'fix_to_sac': transitions['fix_to_sac'] / total_fix_transitions if total_fix_transitions > 0 else 0.5,
+        'sac_to_fix': transitions['sac_to_fix'] / total_sac_transitions if total_sac_transitions > 0 else 0.5,
+        'sac_to_sac': transitions['sac_to_sac'] / total_sac_transitions if total_sac_transitions > 0 else 0.5,
+    }
+
+    # Calculate initial state probabilities
+    total_initial = initial_states['fixation'] + initial_states['saccade']
+    initial_state_probs = {
+        'fixation': initial_states['fixation'] / total_initial if total_initial > 0 else 0.5,
+        'saccade': initial_states['saccade'] / total_initial if total_initial > 0 else 0.5,
+    }
+
+    # Compute position bounds from empirical data
+    if len(all_x_positions) > 0 and len(all_y_positions) > 0:
+        x_bounds = (np.min(all_x_positions), np.max(all_x_positions))
+        y_bounds = (np.min(all_y_positions), np.max(all_y_positions))
+    else:
+        # Default bounds if no data
+        x_bounds = (-2.0, 2.0)
+        y_bounds = (-2.0, 2.0)
+
+    return {
+        'fixation_velocities': np.array(fixation_velocities),
+        'fixation_angles': np.array(fixation_angles),
+        'fixation_vx': np.array(fixation_vx),
+        'fixation_vy': np.array(fixation_vy),
+        'saccade_velocities': np.array(saccade_velocities),
+        'saccade_angles': np.array(saccade_angles),
+        'saccade_vx': np.array(saccade_vx),
+        'saccade_vy': np.array(saccade_vy),
+        'transition_probs': transition_probs,
+        'initial_state_probs': initial_state_probs,
+        'fixation_durations': np.array(fixation_durations),
+        'saccade_durations': np.array(saccade_durations),
+        'x_bounds': x_bounds,
+        'y_bounds': y_bounds,
+    }
+
+
+def simulate_random_walk_trial(start_x: float, start_y: float, duration: float,
+                               velocities_pool: np.ndarray, angles_pool: np.ndarray,
+                               dt_mean: float = 0.05) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Simulate a single random walk trial by sampling from empirical movement statistics.
+
+    Generates a trajectory starting from (start_x, start_y) for the specified duration,
+    using velocities and turning angles sampled from the provided pools.
+
+    Parameters
+    ----------
+    start_x, start_y : float
+        Initial position
+    duration : float
+        Total trial duration in seconds
+    velocities_pool : np.ndarray
+        Array of velocities to sample from (units/second)
+    angles_pool : np.ndarray
+        Array of turning angles to sample from (radians)
+    dt_mean : float
+        Mean time step in seconds (default: 0.05 for ~20 Hz)
+
+    Returns
+    -------
+    tuple of (eye_x, eye_y, eye_times)
+        eye_x : np.ndarray
+            X positions of simulated trajectory
+        eye_y : np.ndarray
+            Y positions of simulated trajectory
+        eye_times : np.ndarray
+            Timestamps of simulated trajectory
+    """
+    # Initialize position and direction
+    x, y = start_x, start_y
+    direction = np.random.uniform(0, 2*np.pi)  # Random initial direction
+
+    # Track trajectory
+    trajectory_x = [x]
+    trajectory_y = [y]
+    trajectory_times = [0.0]
+
+    t = 0.0
+
+    while t < duration:
+        # Sample time step with some variability (exponential distribution)
+        dt = np.random.exponential(dt_mean)
+        dt = min(dt, duration - t)  # Don't exceed trial duration
+
+        if dt <= 0:
+            break
+
+        # Sample velocity and turning angle from empirical distributions
+        velocity = np.random.choice(velocities_pool)
+        turning_angle = np.random.choice(angles_pool)
+
+        # Update direction
+        direction += turning_angle
+
+        # Update position
+        displacement = velocity * dt
+        x += displacement * np.cos(direction)
+        y += displacement * np.sin(direction)
+
+        # Record position
+        t += dt
+        trajectory_x.append(x)
+        trajectory_y.append(y)
+        trajectory_times.append(t)
+
+    return np.array(trajectory_x), np.array(trajectory_y), np.array(trajectory_times)
+
+
+def simulate_markov_random_walk_trial(start_x: float, start_y: float, duration: float,
+                                       state_stats: dict,
+                                       dt_mean: float = 0.05) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Simulate a single random walk trial using a Markov model with fixation/saccade states.
+
+    Uses a two-state Markov model:
+    - Fixation state: Sample from low x and y velocity component distributions
+    - Saccade state: Sample from high x and y velocity component distributions
+    - Transitions between states based on empirical transition probabilities
+    - Position bounds: Enforced via reflection to keep positions realistic
+
+    This preserves both temporal structure and anisotropic movement patterns
+    (e.g., more horizontal than vertical movement).
+
+    Parameters
+    ----------
+    start_x, start_y : float
+        Initial position
+    duration : float
+        Total trial duration in seconds
+    state_stats : dict
+        Dictionary from compute_movement_statistics_with_states() containing:
+        - fixation_vx, fixation_vy: x and y velocity components for fixation
+        - saccade_vx, saccade_vy: x and y velocity components for saccade
+        - transition_probs
+        - initial_state_probs
+        - x_bounds, y_bounds (optional): position bounds for reflection
+    dt_mean : float
+        Mean time step in seconds (default: 0.05 for ~20 Hz)
+
+    Returns
+    -------
+    tuple of (eye_x, eye_y, eye_times)
+        eye_x : np.ndarray
+            X positions of simulated trajectory
+        eye_y : np.ndarray
+            Y positions of simulated trajectory
+        eye_times : np.ndarray
+            Timestamps of simulated trajectory
+    """
+    # Initialize position
+    x, y = start_x, start_y
+
+    # Track trajectory
+    trajectory_x = [x]
+    trajectory_y = [y]
+    trajectory_times = [0.0]
+
+    # Choose initial state based on empirical probabilities
+    if np.random.random() < state_stats['initial_state_probs']['fixation']:
+        current_state = 'fixation'
+    else:
+        current_state = 'saccade'
+
+    t = 0.0
+
+    while t < duration:
+        # Sample time step
+        dt = np.random.exponential(dt_mean)
+        dt = min(dt, duration - t)
+
+        if dt <= 0:
+            break
+
+        # Sample x and y velocity components separately based on current state
+        # This preserves anisotropic movement patterns (e.g., more horizontal than vertical)
+        if current_state == 'fixation':
+            if len(state_stats['fixation_vx']) > 0:
+                vx = np.random.choice(state_stats['fixation_vx'])
+                vy = np.random.choice(state_stats['fixation_vy'])
+            else:
+                vx, vy = 0.0, 0.0  # Fallback
+        else:  # saccade
+            if len(state_stats['saccade_vx']) > 0:
+                vx = np.random.choice(state_stats['saccade_vx'])
+                vy = np.random.choice(state_stats['saccade_vy'])
+            else:
+                vx, vy = 0.0, 0.0  # Fallback
+
+        # Update position using velocity components
+        x += vx * dt
+        y += vy * dt
+
+        # Apply boundary constraints with reflection if bounds are provided
+        if 'x_bounds' in state_stats and 'y_bounds' in state_stats:
+            x_min, x_max = state_stats['x_bounds']
+            y_min, y_max = state_stats['y_bounds']
+
+            # Reflect x position if out of bounds
+            if x < x_min:
+                x = x_min + (x_min - x)  # Reflect across min boundary
+            elif x > x_max:
+                x = x_max - (x - x_max)  # Reflect across max boundary
+
+            # Reflect y position if out of bounds
+            if y < y_min:
+                y = y_min + (y_min - y)  # Reflect across min boundary
+            elif y > y_max:
+                y = y_max - (y - y_max)  # Reflect across max boundary
+
+        # Record position
+        t += dt
+        trajectory_x.append(x)
+        trajectory_y.append(y)
+        trajectory_times.append(t)
+
+        # Transition to next state based on Markov transition probabilities
+        if current_state == 'fixation':
+            if np.random.random() > state_stats['transition_probs']['fix_to_fix']:
+                current_state = 'saccade'
+        else:  # saccade
+            if np.random.random() > state_stats['transition_probs']['sac_to_sac']:
+                current_state = 'fixation'
+
+    return np.array(trajectory_x), np.array(trajectory_y), np.array(trajectory_times)
+
+
+def calculate_random_walk_chance_performance(trials: list[dict],
+                                             n_simulations: int = 100,
+                                             min_fixation_duration: float = FIXATION_MIN_DURATION,
+                                             max_movement: float = FIXATION_MAX_MOVEMENT,
+                                             dt_mean: float = 0.05,
+                                             velocity_threshold: float = 2.0,
+                                             results_dir: Optional[Path] = None) -> dict:
+    """Calculate chance performance using Markov random walk simulations with fixation/saccade states.
+
+    Algorithm:
+    1. Compute state-specific movement statistics (fixation vs saccade) from all actual eye trajectories
+    2. Calculate Markov transition probabilities between states
+    3. For each trial, run N Markov random walk simulations starting from actual start position
+    4. Use same trial duration, target position/size, and cursor size as actual trial
+    5. Assess each random walk trial using calculate_trial_success_from_fixations()
+    6. Aggregate success rates by target diameter
+
+    Parameters
+    ----------
+    trials : list of dict
+        List of trial data dictionaries with eye trajectories
+    n_simulations : int
+        Number of random walk simulations per trial (default: 100)
+    min_fixation_duration : float
+        Minimum fixation duration for success (default: 0.7 seconds)
+    max_movement : float
+        Maximum movement for fixation detection (default: 0.1 units)
+    dt_mean : float
+        Mean time step for simulation (default: 0.05 seconds for ~20 Hz)
+    velocity_threshold : float
+        Velocity threshold (units/second) to distinguish fixation from saccade (default: 2.0)
+    results_dir : Path, optional
+        Directory to save results
+
+    Returns
+    -------
+    dict
+        Dictionary with keys:
+        - 'overall_chance': float, overall chance performance rate
+        - 'by_diameter': dict mapping diameter -> chance rate
+        - 'by_diameter_counts': dict mapping diameter -> (n_success, n_total)
+        - 'by_diameter_se': dict mapping diameter -> standard error
+        - 'state_stats': dict with Markov model statistics
+        - 'n_fixation_samples': int, number of fixation velocity samples
+        - 'n_saccade_samples': int, number of saccade velocity samples
+    """
+    print("\n" + "="*80)
+    print("CALCULATING MARKOV RANDOM WALK CHANCE PERFORMANCE")
+    print("="*80)
+
+    # Step 1: Compute movement statistics with state classification
+    print("\nStep 1: Computing movement statistics with fixation/saccade state classification...")
+    print(f"  Using velocity threshold: {velocity_threshold:.2f} units/s")
+    state_stats = compute_movement_statistics_with_states(trials, velocity_threshold)
+
+    n_fix_vel = len(state_stats['fixation_velocities'])
+    n_sac_vel = len(state_stats['saccade_velocities'])
+
+    if n_fix_vel == 0 and n_sac_vel == 0:
+        print("ERROR: No movement statistics computed. Need trials with eye data.")
+        return {
+            'overall_chance': 0.0,
+            'by_diameter': {},
+            'by_diameter_counts': {},
+            'by_diameter_se': {},
+            'n_fixation_samples': 0,
+            'n_saccade_samples': 0,
+            'state_stats': {}
+        }
+
+    print(f"\n  Fixation state statistics:")
+    print(f"    N velocity samples: {n_fix_vel}")
+    if n_fix_vel > 0:
+        print(f"    Mean velocity: {np.mean(state_stats['fixation_velocities']):.4f}")
+        print(f"    Median velocity: {np.median(state_stats['fixation_velocities']):.4f}")
+        print(f"    Std velocity: {np.std(state_stats['fixation_velocities']):.4f}")
+
+    print(f"\n  Saccade state statistics:")
+    print(f"    N velocity samples: {n_sac_vel}")
+    if n_sac_vel > 0:
+        print(f"    Mean velocity: {np.mean(state_stats['saccade_velocities']):.4f}")
+        print(f"    Median velocity: {np.median(state_stats['saccade_velocities']):.4f}")
+        print(f"    Std velocity: {np.std(state_stats['saccade_velocities']):.4f}")
+
+    print(f"\n  Markov transition probabilities:")
+    print(f"    Fixation -> Fixation: {100*state_stats['transition_probs']['fix_to_fix']:.1f}%")
+    print(f"    Fixation -> Saccade: {100*state_stats['transition_probs']['fix_to_sac']:.1f}%")
+    print(f"    Saccade -> Fixation: {100*state_stats['transition_probs']['sac_to_fix']:.1f}%")
+    print(f"    Saccade -> Saccade: {100*state_stats['transition_probs']['sac_to_sac']:.1f}%")
+
+    print(f"\n  Initial state probabilities:")
+    print(f"    Start in fixation: {100*state_stats['initial_state_probs']['fixation']:.1f}%")
+    print(f"    Start in saccade: {100*state_stats['initial_state_probs']['saccade']:.1f}%")
+
+    print(f"\n  Position bounds from empirical data:")
+    x_min, x_max = state_stats['x_bounds']
+    y_min, y_max = state_stats['y_bounds']
+    print(f"    X range: [{x_min:.3f}, {x_max:.3f}]")
+    print(f"    Y range: [{y_min:.3f}, {y_max:.3f}]")
+
+    # Step 2: Run Markov random walk simulations for each trial
+    print(f"\nStep 2: Running {n_simulations} Markov random walk simulations per trial...")
+
+    # Track results overall and by diameter
+    overall_successes = 0
+    overall_total = 0
+    by_diameter = {}  # diameter -> list of success indicators (0 or 1)
+
+    # Filter to trials with eye data
+    valid_trials = [t for t in trials if t.get('has_eye_data', False) and len(t.get('eye_x', [])) > 0]
+
+    if len(valid_trials) == 0:
+        print("ERROR: No valid trials with eye data found.")
+        return {
+            'overall_chance': 0.0,
+            'by_diameter': {},
+            'by_diameter_counts': {},
+            'by_diameter_se': {},
+            'n_fixation_samples': n_fix_vel,
+            'n_saccade_samples': n_sac_vel,
+            'state_stats': state_stats
+        }
+
+    print(f"  Processing {len(valid_trials)} valid trials...")
+
+    for trial_idx, trial in enumerate(valid_trials):
+        if (trial_idx + 1) % 50 == 0:
+            print(f"    Progress: {trial_idx + 1}/{len(valid_trials)} trials")
+
+        # Get trial parameters
+        eye_x = np.array(trial['eye_x'])
+        eye_y = np.array(trial['eye_y'])
+        eye_times = np.array(trial['eye_times'])
+
+        start_x = eye_x[0]
+        start_y = eye_y[0]
+        duration = eye_times[-1] - eye_times[0]
+
+        target_x = trial['target_x']
+        target_y = trial['target_y']
+        target_diameter = trial['target_diameter']
+        target_radius = target_diameter / 2.0
+        cursor_diameter = trial.get('cursor_diameter', 0.2)
+        cursor_radius = cursor_diameter / 2.0
+        contact_threshold = target_radius + cursor_radius
+
+        # Track results for this diameter
+        if target_diameter not in by_diameter:
+            by_diameter[target_diameter] = []
+
+        # Run N simulations for this trial
+        for _ in range(n_simulations):
+            # Generate Markov random walk trajectory
+            sim_x, sim_y, sim_times = simulate_markov_random_walk_trial(
+                start_x, start_y, duration, state_stats, dt_mean
+            )
+
+            # Assess success using existing fixation-based criterion
+            success, _ = calculate_trial_success_from_fixations(
+                sim_x, sim_y, sim_times,
+                target_x, target_y,
+                contact_threshold,
+                min_fixation_duration,
+                max_movement
+            )
+
+            # Record result
+            success_int = 1 if success else 0
+            by_diameter[target_diameter].append(success_int)
+            overall_successes += success_int
+            overall_total += 1
+
+    # Step 3: Aggregate results
+    print("\nStep 3: Aggregating results...")
+
+    overall_chance = overall_successes / overall_total if overall_total > 0 else 0.0
+    print(f"  Overall chance performance: {100*overall_chance:.2f}% ({overall_successes}/{overall_total})")
+
+    # Compute per-diameter statistics
+    by_diameter_rates = {}
+    by_diameter_counts = {}
+    by_diameter_se = {}  # Standard errors
+
+    print("\n  Chance performance by target diameter:")
+    for diameter in sorted(by_diameter.keys()):
+        successes = by_diameter[diameter]
+        n_success = sum(successes)
+        n_total = len(successes)
+        rate = n_success / n_total if n_total > 0 else 0.0
+
+        # Calculate binomial standard error: SE = sqrt(p * (1-p) / n)
+        if n_total > 0:
+            se = np.sqrt(rate * (1 - rate) / n_total)
+        else:
+            se = 0.0
+
+        by_diameter_rates[diameter] = rate
+        by_diameter_counts[diameter] = (n_success, n_total)
+        by_diameter_se[diameter] = se
+
+        print(f"    Diameter {diameter:.3f}: {100*rate:.2f}% ± {100*se:.2f}% ({n_success}/{n_total})")
+
+    # Save detailed results to CSV if requested
+    if results_dir is not None:
+        csv_path = results_dir / 'random_walk_chance_performance.csv'
+        print(f"\n  Saving results to {csv_path}")
+
+        with open(csv_path, 'w', newline='') as csvfile:
+            csv_writer = csv.writer(csvfile)
+            csv_writer.writerow(['target_diameter', 'n_simulations', 'n_success', 'chance_rate'])
+
+            for diameter in sorted(by_diameter_rates.keys()):
+                n_success, n_total = by_diameter_counts[diameter]
+                rate = by_diameter_rates[diameter]
+                csv_writer.writerow([diameter, n_total, n_success, rate])
+
+    print("\n" + "="*80)
+
+    return {
+        'overall_chance': overall_chance,
+        'by_diameter': by_diameter_rates,
+        'by_diameter_counts': by_diameter_counts,
+        'by_diameter_se': by_diameter_se,
+        'n_fixation_samples': n_fix_vel,
+        'n_saccade_samples': n_sac_vel,
+        'state_stats': state_stats
+    }
+
+
 def plot_trial_success(eot_df: pd.DataFrame, results_dir: Optional[Path] = None,
                        animal_id: Optional[str] = None, session_date: str = "",
-                       trials: Optional[list[dict]] = None, session_time: Optional[str] = None) -> plt.Figure:
+                       trials: Optional[list[dict]] = None, session_time: Optional[str] = None,
+                       random_walk_results: Optional[dict] = None) -> plt.Figure:
     """Plot trial success vs failure summary, independent of --include-failed-trials flag.
 
     Creates a figure with:
@@ -1277,6 +2103,8 @@ def plot_trial_success(eot_df: pd.DataFrame, results_dir: Optional[Path] = None,
         Session date for title
     session_time : str, optional
         Session time (HH:MM) for title
+    random_walk_results : dict, optional
+        Pre-computed random walk chance performance results to avoid recalculation
 
     Returns
     -------
@@ -1302,19 +2130,27 @@ def plot_trial_success(eot_df: pd.DataFrame, results_dir: Optional[Path] = None,
     # Get target diameter from trials (should be consistent across session)
     target_diameter = trials[0]['target_diameter'] if trials and len(trials) > 0 else None
 
-    # Calculate chance level if trials data is provided
+    # Calculate chance level using random walk simulations if trials data is provided
     chance_level = None
-    if trials is not None and len(trials) > 0:
-        print("  Calculating chance level (1000 shuffles)...")
-        chance_level = calculate_chance_level(trials, n_shuffles=1000, results_dir=results_dir)
-        print(f"  Chance level: {100*chance_level:.1f}%")
+    if random_walk_results is not None:
+        # Use pre-computed results
+        chance_level = random_walk_results['overall_chance']
+        print(f"  Using pre-computed random walk chance level: {100*chance_level:.1f}%")
+    elif trials is not None and len(trials) > 0:
+        # Calculate if not provided
+        print("  Calculating random walk chance performance (100 simulations per trial)...")
+        rw_results = calculate_random_walk_chance_performance(
+            trials, n_simulations=100, results_dir=results_dir
+        )
+        chance_level = rw_results['overall_chance']
+        print(f"  Random walk chance level: {100*chance_level:.1f}%")
 
     # Create figure with 2 subplots
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), height_ratios=[1, 1.5])
 
     # --- Top plot: Bar chart showing fraction of success vs failure ---
     if chance_level is not None:
-        categories = ['Success', 'Failed', 'Chance']
+        categories = ['Success', 'Failed', 'RW Chance']
         counts = [n_success, n_failed, chance_level * n_trials]
         percentages = [pct_success, pct_failed, 100 * chance_level]
         colors = ['forestgreen', 'firebrick', 'gray']
@@ -1414,7 +2250,8 @@ def plot_trial_success(eot_df: pd.DataFrame, results_dir: Optional[Path] = None,
 
 def plot_psychometric_curve(eot_df: pd.DataFrame,target_df: pd.DataFrame, results_dir: Optional[Path] = None,
                             animal_id: Optional[str] = None, session_date: str = "",
-                            session_time: Optional[str] = None) -> plt.Figure:
+                            session_time: Optional[str] = None,
+                            random_walk_chance: Optional[dict] = None) -> plt.Figure:
     """Plot psychometric curve showing success rate as a function of target diameter.
 
     Creates a plot with:
@@ -1422,13 +2259,14 @@ def plot_psychometric_curve(eot_df: pd.DataFrame,target_df: pd.DataFrame, result
     - Target diameter on x-axis
     - Error bars showing binomial standard error
     - Number of trials annotated for each diameter
+    - Optional: Random walk chance performance per diameter
 
     Parameters
     ----------
     eot_df : pd.DataFrame
         End-of-trial dataframe containing 'trial_success' (2=success) and 'diameter' columns
     target_df : pd.DataFrame
-        Target dataframe containing 'diameter' column   
+        Target dataframe containing 'diameter' column
     results_dir : Path, optional
         Directory to save the figure
     animal_id : str, optional
@@ -1437,6 +2275,9 @@ def plot_psychometric_curve(eot_df: pd.DataFrame,target_df: pd.DataFrame, result
         Session date for title (format: YYYY-MM-DD)
     session_time : str, optional
         Session time for title (format: HH:MM)
+    random_walk_chance : dict, optional
+        Results from calculate_random_walk_chance_performance() containing
+        'by_diameter' key with diameter -> chance rate mapping
 
     Returns
     -------
@@ -1504,7 +2345,31 @@ def plot_psychometric_curve(eot_df: pd.DataFrame,target_df: pd.DataFrame, result
     # Plot psychometric curve with error bars
     ax.errorbar(diameters, success_rates, yerr=error_bars,
                 fmt='o-', markersize=10, linewidth=2, capsize=5, capthick=2,
-                color='steelblue', ecolor='darkblue', label='Success Rate')
+                color='steelblue', ecolor='darkblue', label='Actual Success Rate')
+
+    # Plot random walk chance performance if provided
+    if random_walk_chance is not None and 'by_diameter' in random_walk_chance:
+        chance_by_diameter = random_walk_chance['by_diameter']
+        chance_se_by_diameter = random_walk_chance.get('by_diameter_se', {})
+
+        # Extract chance rates and standard errors for the same diameters
+        chance_rates = []
+        chance_errors = []
+        chance_diameters = []
+        for d in diameters:
+            if d in chance_by_diameter:
+                chance_diameters.append(d)
+                chance_rates.append(chance_by_diameter[d] * 100)  # Convert to percentage
+                # Get standard error, default to 0 if not available
+                se = chance_se_by_diameter.get(d, 0.0) * 100  # Convert to percentage
+                chance_errors.append(se)
+
+        if len(chance_rates) > 0:
+            ax.errorbar(chance_diameters, chance_rates, yerr=chance_errors,
+                       fmt='o--', markersize=8, linewidth=2, capsize=5, capthick=2,
+                       color='gray', ecolor='darkgray',
+                       markeredgecolor='black', markeredgewidth=1,
+                       label='Random Walk Chance', alpha=0.8)
 
     # Annotate number of trials for each diameter
     for i, (d, sr, n) in enumerate(zip(diameters, success_rates, n_trials_per_diameter)):
@@ -1560,14 +2425,17 @@ def plot_psychometric_curve(eot_df: pd.DataFrame,target_df: pd.DataFrame, result
 def plot_trajectories_by_diameter(trials: list[dict], results_dir: Optional[Path] = None,
                                   animal_id: Optional[str] = None, session_date: str = "",
                                   session_time: Optional[str] = None,
-                                  min_fixation_duration: float = 0.45,
-                                  max_fixation_movement: float = 0.15,
-                                  eye_df: Optional[pd.DataFrame] = None) -> plt.Figure:
-    """Plot fixation points grouped by target diameter.
-    
+                                  min_fixation_duration: float = FIXATION_MIN_DURATION,
+                                  max_fixation_movement: float = FIXATION_MAX_MOVEMENT,
+                                  eye_df: Optional[pd.DataFrame] = None,
+                                  show_random_walk: bool = True,
+                                  velocity_threshold: float = 2.0) -> plt.Figure:
+    """Plot fixation points grouped by target diameter with optional random walk comparison.
+
     Creates a figure with subplots, one for each unique target diameter.
-    Each subplot shows fixation points with successful trials in green and failed trials in red.
-    
+    Each subplot shows fixation points with successful trials in green, failed trials in red,
+    and optional random walk fixations in grey.
+
     Parameters
     ----------
     trials : list of dict
@@ -1581,12 +2449,16 @@ def plot_trajectories_by_diameter(trials: list[dict], results_dir: Optional[Path
     session_time : str, optional
         Session time for title (format: HH:MM)
     min_fixation_duration : float
-        Minimum fixation duration in seconds (default: 0.45)
+        Minimum fixation duration in seconds (default: 0.7)
     max_fixation_movement : float
-        Maximum movement threshold for fixation (default: 0.15)
+        Maximum movement threshold for fixation (default: 0.2)
     eye_df : pd.DataFrame, optional
         Complete eye tracking dataframe with fixation data (including inter-trial intervals)
-    
+    show_random_walk : bool
+        Whether to show random walk fixations in grey (default: True)
+    velocity_threshold : float
+        Velocity threshold for fixation/saccade classification in random walk (default: 2.0)
+
     Returns
     -------
     matplotlib.figure.Figure
@@ -1610,7 +2482,15 @@ def plot_trajectories_by_diameter(trials: list[dict], results_dir: Optional[Path
     if len(diameter_trials) == 0:
         print("Warning: No trials with eye data and diameter information found")
         return None
-    
+
+    # Compute Markov model statistics once for all random walks
+    state_stats = None
+    if show_random_walk:
+        print("  Computing movement statistics for random walk generation...")
+        state_stats = compute_movement_statistics_with_states(trials, velocity_threshold)
+        print(f"    Fixation samples: {len(state_stats['fixation_vx'])}")
+        print(f"    Saccade samples: {len(state_stats['saccade_vx'])}")
+
     # Sort diameters for consistent plotting
     sorted_diameters = sorted(diameter_trials.keys())
     n_diameters = len(sorted_diameters)
@@ -1674,13 +2554,35 @@ def plot_trajectories_by_diameter(trials: list[dict], results_dir: Optional[Path
                 fix_x = eye_x[start:end]
                 fix_y = eye_y[start:end]
                 ax.plot(fix_x, fix_y, marker, color=color, markersize=6, alpha=0.8)
-            
+
                 # Calculate centerpoint of this fixation
                 centerpoint_x = np.mean(fix_x)
                 centerpoint_y = np.mean(fix_y)
 
                 # Store centerpoint
                 all_centerpoints.append([centerpoint_x, centerpoint_y])
+
+            # Generate and plot random walk fixation if requested
+            if show_random_walk and state_stats is not None:
+                # Generate random walk for this trial
+                start_x = eye_x[0]
+                start_y = eye_y[0]
+                duration = eye_times[-1] - eye_times[0]
+
+                rw_x, rw_y, rw_times = simulate_markov_random_walk_trial(
+                    start_x, start_y, duration, state_stats, dt_mean=0.05
+                )
+
+                # Detect fixations in random walk
+                rw_fixations = detect_fixations(rw_x, rw_y, rw_times,
+                                                min_fixation_duration, max_fixation_movement)
+
+                # Plot last random walk fixation in grey
+                if len(rw_fixations) > 0:
+                    start, end, duration, span = rw_fixations[-1]
+                    rw_fix_x = rw_x[start:end]
+                    rw_fix_y = rw_y[start:end]
+                    ax.plot(rw_fix_x, rw_fix_y, 'o', color='grey', markersize=4, alpha=0.5)
             
             # # Plot inter-trial fixations in purple (if eye_df is provided)
             # if eye_df is not None and 'in_fixation' in eye_df.columns:
@@ -1777,14 +2679,20 @@ def plot_trajectories_by_diameter(trials: list[dict], results_dir: Optional[Path
         if idx == 0:
             from matplotlib.lines import Line2D
             legend_elements = [
-                Line2D([0], [0], marker='o', color='w', markerfacecolor='green', 
+                Line2D([0], [0], marker='o', color='w', markerfacecolor='green',
                     markersize=8, label='Success fixations'),
-                Line2D([0], [0], marker='x', color='red', markersize=8, 
+                Line2D([0], [0], marker='x', color='red', markersize=8,
                     linewidth=2, label='Failed fixations'),
-                Line2D([0], [0], marker='o', color='w', markerfacecolor='purple', 
+                Line2D([0], [0], marker='o', color='w', markerfacecolor='purple',
                     markersize=8, label='Inter-trial fixations'),
                 Line2D([0], [0], color='blue', linewidth=2, linestyle='--', label='Target')
             ]
+            # Add random walk fixations to legend if shown
+            if show_random_walk:
+                legend_elements.append(
+                    Line2D([0], [0], marker='o', color='w', markerfacecolor='grey',
+                        markersize=8, alpha=0.5, label='Random walk fixations')
+                )
             ax.legend(handles=legend_elements, loc='upper right', fontsize=9)
     
     # Hide extra subplots if we have more subplots than diameters
@@ -1935,6 +2843,626 @@ def plot_path_length(trials: list[dict], results_dir: Optional[Path] = None,
         filename = f"{prefix}saccade_feedback_path_length.png"
         fig.savefig(results_dir / filename, dpi=150, bbox_inches='tight')
         print(f"Saved path length plot to {results_dir / filename}")
+
+    return fig
+
+
+def plot_path_efficiency(trials: list[dict], results_dir: Optional[Path] = None,
+                         animal_id: Optional[str] = None, session_date: str = "") -> plt.Figure:
+    """Plot path efficiency comparing successful vs failed trials.
+
+    Path efficiency is the ratio of straight-line distance to actual path length.
+    Trials where the eye starts within the target are excluded (set to NaN).
+    Only trials with efficiency <= 1.0 are included.
+
+    Parameters
+    ----------
+    trials : list of dict
+        List of trial data dictionaries
+    results_dir : Path, optional
+        Directory to save the figure
+    animal_id : str, optional
+        Animal identifier for filename
+    session_date : str, optional
+        Session date for title
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        The generated figure
+    """
+    # Separate trials by success/failure and filter out NaN values and efficiency > 1
+    successful_trials = []
+    failed_trials = []
+
+    for t in trials:
+        eff = t.get('path_efficiency', np.nan)
+        if not np.isnan(eff) and eff <= 1.0:
+            if t.get('trial_failed', False):
+                failed_trials.append(t)
+            else:
+                successful_trials.append(t)
+
+    success_efficiencies = [t['path_efficiency'] for t in successful_trials]
+    failed_efficiencies = [t['path_efficiency'] for t in failed_trials]
+
+    # Verify data before plotting
+    print(f"\nPath Efficiency - Data verification:")
+    if success_efficiencies:
+        print(f"  Successful: n={len(success_efficiencies)}, mean={np.mean(success_efficiencies):.4f}, "
+              f"min={np.min(success_efficiencies):.4f}, max={np.max(success_efficiencies):.4f}")
+    if failed_efficiencies:
+        print(f"  Failed: n={len(failed_efficiencies)}, mean={np.mean(failed_efficiencies):.4f}, "
+              f"min={np.min(failed_efficiencies):.4f}, max={np.max(failed_efficiencies):.4f}")
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+
+    # Plot 1: Bar plot comparing means
+    categories = []
+    means = []
+    colors = []
+    errors = []  # Standard error of the mean
+
+    if success_efficiencies:
+        categories.append('Successful')
+        means.append(np.mean(success_efficiencies))
+        colors.append('green')
+        errors.append(np.std(success_efficiencies) / np.sqrt(len(success_efficiencies)))
+
+    if failed_efficiencies:
+        categories.append('Failed')
+        means.append(np.mean(failed_efficiencies))
+        colors.append('red')
+        errors.append(np.std(failed_efficiencies) / np.sqrt(len(failed_efficiencies)))
+
+    x_pos = np.arange(len(categories))
+    ax1.bar(x_pos, means, yerr=errors, color=colors, alpha=0.7,
+            edgecolor='black', linewidth=1.5, capsize=10, error_kw={'linewidth': 2})
+    ax1.set_xticks(x_pos)
+    ax1.set_xticklabels(categories, fontsize=12)
+    ax1.set_ylabel('Path Efficiency', fontsize=12)
+    ax1.set_ylim(0, 1.0)
+    ax1.axhline(1.0, color='black', linestyle='--', linewidth=1, alpha=0.5,
+                label='Perfect efficiency')
+
+    title = 'Path Efficiency - Successful vs Failed'
+    if animal_id:
+        title += f' - {animal_id}'
+    if session_date:
+        title += f' ({session_date})'
+    ax1.set_title(title, fontsize=14, fontweight='bold')
+    ax1.grid(True, alpha=0.3, axis='y')
+    ax1.legend(fontsize=10)
+
+    # Add value labels on bars
+    for i, (mean, err) in enumerate(zip(means, errors)):
+        ax1.text(i, mean + err + 0.02, f'{mean:.3f}', ha='center', va='bottom',
+                fontsize=11, fontweight='bold')
+
+    # Add sample size labels
+    if success_efficiencies and failed_efficiencies:
+        ax1.text(0, -0.08, f'n={len(success_efficiencies)}', ha='center', va='top',
+                fontsize=10, transform=ax1.get_xaxis_transform())
+        ax1.text(1, -0.08, f'n={len(failed_efficiencies)}', ha='center', va='top',
+                fontsize=10, transform=ax1.get_xaxis_transform())
+    elif success_efficiencies:
+        ax1.text(0, -0.08, f'n={len(success_efficiencies)}', ha='center', va='top',
+                fontsize=10, transform=ax1.get_xaxis_transform())
+    elif failed_efficiencies:
+        ax1.text(0, -0.08, f'n={len(failed_efficiencies)}', ha='center', va='top',
+                fontsize=10, transform=ax1.get_xaxis_transform())
+
+    # Plot 2: Histogram comparing distributions
+    if success_efficiencies and failed_efficiencies:
+        ax2.hist([success_efficiencies, failed_efficiencies],
+                bins=np.linspace(0, 1, 21), color=['green', 'red'], alpha=0.6,
+                edgecolor='black', label=['Successful', 'Failed'])
+        # Add mean lines to histogram
+        mean_success = np.mean(success_efficiencies)
+        mean_failed = np.mean(failed_efficiencies)
+        ax2.axvline(mean_success, color='darkgreen', linestyle='--', linewidth=2,
+                   label=f'Success mean: {mean_success:.3f}')
+        ax2.axvline(mean_failed, color='darkred', linestyle='--', linewidth=2,
+                   label=f'Failed mean: {mean_failed:.3f}')
+    elif success_efficiencies:
+        ax2.hist(success_efficiencies, bins=np.linspace(0, 1, 21),
+                color='green', alpha=0.6, edgecolor='black', label='Successful')
+        mean_success = np.mean(success_efficiencies)
+        ax2.axvline(mean_success, color='darkgreen', linestyle='--', linewidth=2,
+                   label=f'Mean: {mean_success:.3f}')
+    elif failed_efficiencies:
+        ax2.hist(failed_efficiencies, bins=np.linspace(0, 1, 21),
+                color='red', alpha=0.6, edgecolor='black', label='Failed')
+        mean_failed = np.mean(failed_efficiencies)
+        ax2.axvline(mean_failed, color='darkred', linestyle='--', linewidth=2,
+                   label=f'Mean: {mean_failed:.3f}')
+
+    ax2.axvline(1.0, color='black', linestyle='--', linewidth=1, alpha=0.3)
+    ax2.set_xlabel('Path Efficiency', fontsize=12)
+    ax2.set_ylabel('Number of Trials', fontsize=12)
+    ax2.set_xlim(0, 1.0)
+    ax2.set_title('Distribution of Path Efficiency', fontsize=12, fontweight='bold')
+    ax2.grid(True, alpha=0.3, axis='y')
+    ax2.legend(fontsize=10, loc='upper left')
+
+    # Add statistics text
+    stats_lines = []
+    if success_efficiencies:
+        mean_s = np.mean(success_efficiencies)
+        median_s = np.median(success_efficiencies)
+        std_s = np.std(success_efficiencies)
+        stats_lines.append(f'Successful:')
+        stats_lines.append(f'  Mean={mean_s:.3f}')
+        stats_lines.append(f'  Median={median_s:.3f}')
+        stats_lines.append(f'  SD={std_s:.3f}')
+        stats_lines.append(f'  n={len(success_efficiencies)}')
+
+    if failed_efficiencies:
+        if success_efficiencies:
+            stats_lines.append('')
+        mean_f = np.mean(failed_efficiencies)
+        median_f = np.median(failed_efficiencies)
+        std_f = np.std(failed_efficiencies)
+        stats_lines.append(f'Failed:')
+        stats_lines.append(f'  Mean={mean_f:.3f}')
+        stats_lines.append(f'  Median={median_f:.3f}')
+        stats_lines.append(f'  SD={std_f:.3f}')
+        stats_lines.append(f'  n={len(failed_efficiencies)}')
+
+    stats_text = '\n'.join(stats_lines)
+    ax2.text(0.02, 0.98, stats_text, transform=ax2.transAxes,
+            fontsize=10, verticalalignment='top', horizontalalignment='left',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.9),
+            family='monospace')
+
+    plt.tight_layout()
+
+    # Save figure if results directory provided
+    if results_dir:
+        results_dir.mkdir(parents=True, exist_ok=True)
+        prefix = f"{animal_id}_" if animal_id else ""
+        filename = f"{prefix}saccade_feedback_path_efficiency.png"
+        fig.savefig(results_dir / filename, dpi=150, bbox_inches='tight')
+        print(f"Saved path efficiency plot to {results_dir / filename}")
+
+    # Print statistics to console
+    print("\n" + "="*60)
+    print("PATH EFFICIENCY STATISTICS")
+    print("="*60)
+    print("(Excluding: trials where eye starts in target, and efficiency > 1.0)")
+    if success_efficiencies:
+        print(f"\nSuccessful trials:")
+        print(f"  Mean: {np.mean(success_efficiencies):.3f}")
+        print(f"  Median: {np.median(success_efficiencies):.3f}")
+        print(f"  SD: {np.std(success_efficiencies):.3f}")
+        print(f"  n: {len(success_efficiencies)}")
+    if failed_efficiencies:
+        print(f"\nFailed trials:")
+        print(f"  Mean: {np.mean(failed_efficiencies):.3f}")
+        print(f"  Median: {np.median(failed_efficiencies):.3f}")
+        print(f"  SD: {np.std(failed_efficiencies):.3f}")
+        print(f"  n: {len(failed_efficiencies)}")
+    print("="*60)
+
+    return fig
+
+
+def plot_initial_direction_error(trials: list[dict], results_dir: Optional[Path] = None,
+                                  animal_id: Optional[str] = None, session_date: str = "") -> plt.Figure:
+    """Plot initial direction error by trial, separated by success/failure.
+
+    Uses circular statistics for angular data and includes statistical tests.
+
+    Parameters
+    ----------
+    trials : list of dict
+        List of trial data dictionaries
+    results_dir : Path, optional
+        Directory to save the figure
+    animal_id : str, optional
+        Animal identifier for filename
+    session_date : str, optional
+        Session date for title
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        The generated figure
+    """
+    def compute_circular_stats(angles_deg):
+        """Compute circular statistics for angles in degrees."""
+        angles_rad = np.radians(angles_deg)
+        mean_vector_x = np.cos(angles_rad).mean()
+        mean_vector_y = np.sin(angles_rad).mean()
+        R = np.sqrt(mean_vector_x**2 + mean_vector_y**2)
+        circular_mean_rad = np.arctan2(mean_vector_y, mean_vector_x)
+        circular_mean_deg = np.degrees(circular_mean_rad)
+        circular_std_rad = np.sqrt(-2 * np.log(R)) if R > 0 else np.nan
+        circular_std_deg = np.degrees(circular_std_rad) if not np.isnan(circular_std_rad) else np.nan
+
+        # Rayleigh test for non-uniformity
+        n = len(angles_rad)
+        z_stat = n * R**2
+        rayleigh_p = np.exp(-z_stat) if z_stat < 700 else 0.0  # Avoid overflow
+
+        # V-test: test if distribution is clustered around 0 degrees
+        v_stat = R * np.cos(circular_mean_rad)
+        v_p = np.exp(-n * v_stat**2) if (n * v_stat**2) < 700 else 0.0  # Avoid overflow
+
+        return {
+            'circular_mean': circular_mean_deg,
+            'circular_std': circular_std_deg,
+            'R': R,
+            'n': n,
+            'rayleigh_z': z_stat,
+            'rayleigh_p': rayleigh_p,
+            'v_stat': v_stat,
+            'v_p': v_p
+        }
+
+    # Separate trials by success/failure and filter out NaN values
+    successful_trials = []
+    failed_trials = []
+    all_trials_with_data = []
+
+    for t in trials:
+        dir_error = t.get('initial_direction_error', np.nan)
+        if not np.isnan(dir_error):
+            all_trials_with_data.append(t)
+            if t.get('trial_failed', False):
+                failed_trials.append(t)
+            else:
+                successful_trials.append(t)
+
+    # Find the 4 biggest target sizes
+    target_sizes = sorted(set(t.get('target_diameter', 0) for t in all_trials_with_data), reverse=True)
+    biggest_4_sizes = target_sizes[:4] if len(target_sizes) >= 4 else target_sizes
+    print(f"\nBiggest 4 target sizes: {biggest_4_sizes}")
+
+    # Filter trials for biggest 4 targets
+    all_trials_big4 = [t for t in all_trials_with_data if t.get('target_diameter', 0) in biggest_4_sizes]
+    successful_trials_big4 = [t for t in successful_trials if t.get('target_diameter', 0) in biggest_4_sizes]
+    failed_trials_big4 = [t for t in failed_trials if t.get('target_diameter', 0) in biggest_4_sizes]
+
+    fig, ((ax1, ax3), (ax2, ax4)) = plt.subplots(2, 2, figsize=(14, 6))
+
+    # Compute circular statistics for all trials combined
+    all_errors = [t['initial_direction_error'] for t in all_trials_with_data]
+    stats_all = compute_circular_stats(all_errors) if all_errors else None
+
+    # Compute circular statistics for each group
+    stats_success = None
+    stats_failed = None
+
+    if successful_trials:
+        success_errors = [t['initial_direction_error'] for t in successful_trials]
+        stats_success = compute_circular_stats(success_errors)
+
+    if failed_trials:
+        failed_errors = [t['initial_direction_error'] for t in failed_trials]
+        stats_failed = compute_circular_stats(failed_errors)
+
+    # Plot 1: Histogram of all trials combined
+    ax1.axvline(0, color='black', linestyle='-', linewidth=1, alpha=0.5)
+
+    if all_errors:
+        ax1.hist(all_errors, bins=np.arange(-180, 181, 20),
+                color='steelblue', alpha=0.7, edgecolor='black',
+                label=f'All Trials (n={len(all_errors)})')
+
+    ax1.set_xlabel('Initial Direction Error (degrees)', fontsize=12)
+    ax1.set_ylabel('Number of Trials', fontsize=12)
+    ax1.set_xlim(-180, 180)
+    ax1.set_title('All Trials - All Targets', fontsize=14, fontweight='bold')
+    ax1.grid(True, alpha=0.3, axis='y')
+    ax1.legend(fontsize=11, loc='upper right')
+
+    # Add circular statistics text for all trials
+    if stats_all:
+        stats_lines_all = []
+        stats_lines_all.append("ALL TRIALS:")
+        stats_lines_all.append(f"  Circular mean: {stats_all['circular_mean']:.1f}°")
+        stats_lines_all.append(f"  Circular SD: {stats_all['circular_std']:.1f}°")
+        stats_lines_all.append(f"  R: {stats_all['R']:.3f}")
+        stats_lines_all.append(f"  Rayleigh test: Z={stats_all['rayleigh_z']:.2f}, p={stats_all['rayleigh_p']:.6f}")
+        rayleigh_sig = "***" if stats_all['rayleigh_p'] < 0.001 else ("**" if stats_all['rayleigh_p'] < 0.01 else ("*" if stats_all['rayleigh_p'] < 0.05 else "ns"))
+        stats_lines_all.append(f"    {'Clustered' if stats_all['rayleigh_p'] < 0.05 else 'Uniform'} ({rayleigh_sig})")
+        stats_lines_all.append(f"  V-test (0°): V={stats_all['v_stat']:.3f}, p={stats_all['v_p']:.6f}")
+        v_sig = "***" if stats_all['v_p'] < 0.001 else ("**" if stats_all['v_p'] < 0.01 else ("*" if stats_all['v_p'] < 0.05 else "ns"))
+        stats_lines_all.append(f"    {'Toward target' if stats_all['v_p'] < 0.05 else 'Not toward target'} ({v_sig})")
+        stats_lines_all.append(f"  n={stats_all['n']}")
+
+        stats_text_all = '\n'.join(stats_lines_all)
+        ax1.text(0.02, 0.98, stats_text_all, transform=ax1.transAxes,
+                fontsize=9, verticalalignment='top', horizontalalignment='left',
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.9),
+                family='monospace')
+
+    # Plot 2: Histogram comparing distributions
+    ax2.axvline(0, color='black', linestyle='-', linewidth=1, alpha=0.5)
+
+    if successful_trials and failed_trials:
+        ax2.hist([success_errors, failed_errors], bins=np.arange(-180, 181, 20),
+                color=['green', 'red'], alpha=0.6, edgecolor='black',
+                label=['Successful', 'Failed'])
+    elif successful_trials:
+        ax2.hist(success_errors, bins=np.arange(-180, 181, 20),
+                color='green', alpha=0.6, edgecolor='black', label='Successful')
+    elif failed_trials:
+        ax2.hist(failed_errors, bins=np.arange(-180, 181, 20),
+                color='red', alpha=0.6, edgecolor='black', label='Failed')
+
+    ax2.set_xlabel('Initial Direction Error (degrees)', fontsize=12)
+    ax2.set_ylabel('Number of Trials', fontsize=12)
+    ax2.set_xlim(-180, 180)
+    ax2.set_title('Success vs Failed - All Targets', fontsize=12, fontweight='bold')
+    ax2.grid(True, alpha=0.3, axis='y')
+    ax2.legend(fontsize=11)
+
+    # Add circular statistics text
+    stats_lines = []
+
+    if stats_success:
+        stats_lines.append("SUCCESSFUL TRIALS:")
+        stats_lines.append(f"  Circular mean: {stats_success['circular_mean']:.1f}°")
+        stats_lines.append(f"  Circular SD: {stats_success['circular_std']:.1f}°")
+        stats_lines.append(f"  R: {stats_success['R']:.3f}")
+        stats_lines.append(f"  Rayleigh test: Z={stats_success['rayleigh_z']:.2f}, p={stats_success['rayleigh_p']:.6f}")
+        rayleigh_sig = "***" if stats_success['rayleigh_p'] < 0.001 else ("**" if stats_success['rayleigh_p'] < 0.01 else ("*" if stats_success['rayleigh_p'] < 0.05 else "ns"))
+        stats_lines.append(f"    {'Clustered' if stats_success['rayleigh_p'] < 0.05 else 'Uniform'} ({rayleigh_sig})")
+        stats_lines.append(f"  V-test (0°): V={stats_success['v_stat']:.3f}, p={stats_success['v_p']:.6f}")
+        v_sig = "***" if stats_success['v_p'] < 0.001 else ("**" if stats_success['v_p'] < 0.01 else ("*" if stats_success['v_p'] < 0.05 else "ns"))
+        stats_lines.append(f"    {'Toward target' if stats_success['v_p'] < 0.05 else 'Not toward target'} ({v_sig})")
+        stats_lines.append(f"  n={stats_success['n']}")
+
+    if stats_failed:
+        if stats_success:
+            stats_lines.append("")
+        stats_lines.append("FAILED TRIALS:")
+        stats_lines.append(f"  Circular mean: {stats_failed['circular_mean']:.1f}°")
+        stats_lines.append(f"  Circular SD: {stats_failed['circular_std']:.1f}°")
+        stats_lines.append(f"  R: {stats_failed['R']:.3f}")
+        stats_lines.append(f"  Rayleigh test: Z={stats_failed['rayleigh_z']:.2f}, p={stats_failed['rayleigh_p']:.6f}")
+        rayleigh_sig = "***" if stats_failed['rayleigh_p'] < 0.001 else ("**" if stats_failed['rayleigh_p'] < 0.01 else ("*" if stats_failed['rayleigh_p'] < 0.05 else "ns"))
+        stats_lines.append(f"    {'Clustered' if stats_failed['rayleigh_p'] < 0.05 else 'Uniform'} ({rayleigh_sig})")
+        stats_lines.append(f"  V-test (0°): V={stats_failed['v_stat']:.3f}, p={stats_failed['v_p']:.6f}")
+        v_sig = "***" if stats_failed['v_p'] < 0.001 else ("**" if stats_failed['v_p'] < 0.01 else ("*" if stats_failed['v_p'] < 0.05 else "ns"))
+        stats_lines.append(f"    {'Toward target' if stats_failed['v_p'] < 0.05 else 'Not toward target'} ({v_sig})")
+        stats_lines.append(f"  n={stats_failed['n']}")
+
+    stats_text = '\n'.join(stats_lines)
+    ax2.text(0.02, 0.98, stats_text, transform=ax2.transAxes,
+            fontsize=9, verticalalignment='top', horizontalalignment='left',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.9),
+            family='monospace')
+
+    # RIGHT COLUMN: Biggest 4 targets only
+    # Compute circular statistics for biggest 4 targets
+    all_errors_big4 = [t['initial_direction_error'] for t in all_trials_big4]
+    stats_all_big4 = compute_circular_stats(all_errors_big4) if all_errors_big4 else None
+
+    stats_success_big4 = None
+    stats_failed_big4 = None
+
+    if successful_trials_big4:
+        success_errors_big4 = [t['initial_direction_error'] for t in successful_trials_big4]
+        stats_success_big4 = compute_circular_stats(success_errors_big4)
+
+    if failed_trials_big4:
+        failed_errors_big4 = [t['initial_direction_error'] for t in failed_trials_big4]
+        stats_failed_big4 = compute_circular_stats(failed_errors_big4)
+
+    # Plot 3: Histogram of all trials combined (biggest 4 targets)
+    ax3.axvline(0, color='black', linestyle='-', linewidth=1, alpha=0.5)
+
+    if all_errors_big4:
+        ax3.hist(all_errors_big4, bins=np.arange(-180, 181, 20),
+                color='steelblue', alpha=0.7, edgecolor='black',
+                label=f'All Trials (n={len(all_errors_big4)})')
+
+    ax3.set_xlabel('Initial Direction Error (degrees)', fontsize=12)
+    ax3.set_ylabel('Number of Trials', fontsize=12)
+    ax3.set_xlim(-180, 180)
+    ax3.set_title('All Trials - Biggest 4 Targets', fontsize=14, fontweight='bold')
+    ax3.grid(True, alpha=0.3, axis='y')
+    ax3.legend(fontsize=11, loc='upper right')
+
+    # Add circular statistics text for all trials (biggest 4)
+    if stats_all_big4:
+        stats_lines_all_big4 = []
+        stats_lines_all_big4.append("ALL TRIALS (BIG 4):")
+        stats_lines_all_big4.append(f"  Circular mean: {stats_all_big4['circular_mean']:.1f}°")
+        stats_lines_all_big4.append(f"  Circular SD: {stats_all_big4['circular_std']:.1f}°")
+        stats_lines_all_big4.append(f"  R: {stats_all_big4['R']:.3f}")
+        stats_lines_all_big4.append(f"  Rayleigh: Z={stats_all_big4['rayleigh_z']:.2f}, p={stats_all_big4['rayleigh_p']:.6f}")
+        rayleigh_sig_big4 = "***" if stats_all_big4['rayleigh_p'] < 0.001 else ("**" if stats_all_big4['rayleigh_p'] < 0.01 else ("*" if stats_all_big4['rayleigh_p'] < 0.05 else "ns"))
+        stats_lines_all_big4.append(f"    {'Clustered' if stats_all_big4['rayleigh_p'] < 0.05 else 'Uniform'} ({rayleigh_sig_big4})")
+        stats_lines_all_big4.append(f"  V-test (0°): V={stats_all_big4['v_stat']:.3f}, p={stats_all_big4['v_p']:.6f}")
+        v_sig_big4 = "***" if stats_all_big4['v_p'] < 0.001 else ("**" if stats_all_big4['v_p'] < 0.01 else ("*" if stats_all_big4['v_p'] < 0.05 else "ns"))
+        stats_lines_all_big4.append(f"    {'Toward target' if stats_all_big4['v_p'] < 0.05 else 'Not toward target'} ({v_sig_big4})")
+        stats_lines_all_big4.append(f"  n={stats_all_big4['n']}")
+
+        stats_text_all_big4 = '\n'.join(stats_lines_all_big4)
+        ax3.text(0.02, 0.98, stats_text_all_big4, transform=ax3.transAxes,
+                fontsize=9, verticalalignment='top', horizontalalignment='left',
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.9),
+                family='monospace')
+
+    # Plot 4: Histogram comparing distributions (biggest 4 targets)
+    ax4.axvline(0, color='black', linestyle='-', linewidth=1, alpha=0.5)
+
+    if successful_trials_big4 and failed_trials_big4:
+        ax4.hist([success_errors_big4, failed_errors_big4], bins=np.arange(-180, 181, 20),
+                color=['green', 'red'], alpha=0.6, edgecolor='black',
+                label=['Successful', 'Failed'])
+    elif successful_trials_big4:
+        ax4.hist(success_errors_big4, bins=np.arange(-180, 181, 20),
+                color='green', alpha=0.6, edgecolor='black', label='Successful')
+    elif failed_trials_big4:
+        ax4.hist(failed_errors_big4, bins=np.arange(-180, 181, 20),
+                color='red', alpha=0.6, edgecolor='black', label='Failed')
+
+    ax4.set_xlabel('Initial Direction Error (degrees)', fontsize=12)
+    ax4.set_ylabel('Number of Trials', fontsize=12)
+    ax4.set_xlim(-180, 180)
+    ax4.set_title('Success vs Failed - Biggest 4 Targets', fontsize=12, fontweight='bold')
+    ax4.grid(True, alpha=0.3, axis='y')
+    ax4.legend(fontsize=11)
+
+    # Add circular statistics text (biggest 4)
+    stats_lines_big4 = []
+
+    if stats_success_big4:
+        stats_lines_big4.append("SUCCESSFUL (BIG 4):")
+        stats_lines_big4.append(f"  Circular mean: {stats_success_big4['circular_mean']:.1f}°")
+        stats_lines_big4.append(f"  Circular SD: {stats_success_big4['circular_std']:.1f}°")
+        stats_lines_big4.append(f"  R: {stats_success_big4['R']:.3f}")
+        stats_lines_big4.append(f"  Rayleigh: Z={stats_success_big4['rayleigh_z']:.2f}, p={stats_success_big4['rayleigh_p']:.6f}")
+        rayleigh_sig_s = "***" if stats_success_big4['rayleigh_p'] < 0.001 else ("**" if stats_success_big4['rayleigh_p'] < 0.01 else ("*" if stats_success_big4['rayleigh_p'] < 0.05 else "ns"))
+        stats_lines_big4.append(f"    {'Clustered' if stats_success_big4['rayleigh_p'] < 0.05 else 'Uniform'} ({rayleigh_sig_s})")
+        stats_lines_big4.append(f"  V-test (0°): V={stats_success_big4['v_stat']:.3f}, p={stats_success_big4['v_p']:.6f}")
+        v_sig_s = "***" if stats_success_big4['v_p'] < 0.001 else ("**" if stats_success_big4['v_p'] < 0.01 else ("*" if stats_success_big4['v_p'] < 0.05 else "ns"))
+        stats_lines_big4.append(f"    {'Toward target' if stats_success_big4['v_p'] < 0.05 else 'Not toward target'} ({v_sig_s})")
+        stats_lines_big4.append(f"  n={stats_success_big4['n']}")
+
+    if stats_failed_big4:
+        if stats_success_big4:
+            stats_lines_big4.append("")
+        stats_lines_big4.append("FAILED (BIG 4):")
+        stats_lines_big4.append(f"  Circular mean: {stats_failed_big4['circular_mean']:.1f}°")
+        stats_lines_big4.append(f"  Circular SD: {stats_failed_big4['circular_std']:.1f}°")
+        stats_lines_big4.append(f"  R: {stats_failed_big4['R']:.3f}")
+        stats_lines_big4.append(f"  Rayleigh: Z={stats_failed_big4['rayleigh_z']:.2f}, p={stats_failed_big4['rayleigh_p']:.6f}")
+        rayleigh_sig_f = "***" if stats_failed_big4['rayleigh_p'] < 0.001 else ("**" if stats_failed_big4['rayleigh_p'] < 0.01 else ("*" if stats_failed_big4['rayleigh_p'] < 0.05 else "ns"))
+        stats_lines_big4.append(f"    {'Clustered' if stats_failed_big4['rayleigh_p'] < 0.05 else 'Uniform'} ({rayleigh_sig_f})")
+        stats_lines_big4.append(f"  V-test (0°): V={stats_failed_big4['v_stat']:.3f}, p={stats_failed_big4['v_p']:.6f}")
+        v_sig_f = "***" if stats_failed_big4['v_p'] < 0.001 else ("**" if stats_failed_big4['v_p'] < 0.01 else ("*" if stats_failed_big4['v_p'] < 0.05 else "ns"))
+        stats_lines_big4.append(f"    {'Toward target' if stats_failed_big4['v_p'] < 0.05 else 'Not toward target'} ({v_sig_f})")
+        stats_lines_big4.append(f"  n={stats_failed_big4['n']}")
+
+    stats_text_big4 = '\n'.join(stats_lines_big4)
+    ax4.text(0.02, 0.98, stats_text_big4, transform=ax4.transAxes,
+            fontsize=9, verticalalignment='top', horizontalalignment='left',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.9),
+            family='monospace')
+
+    # Add main title for entire figure
+    main_title = 'Initial Direction Error Analysis'
+    if animal_id:
+        main_title += f' - {animal_id}'
+    if session_date:
+        main_title += f' ({session_date})'
+    fig.suptitle(main_title, fontsize=16, fontweight='bold', y=0.995)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.99])
+
+    # Save figure if results directory provided
+    if results_dir:
+        results_dir.mkdir(parents=True, exist_ok=True)
+        prefix = f"{animal_id}_" if animal_id else ""
+        filename = f"{prefix}saccade_feedback_initial_direction_error.png"
+        fig.savefig(results_dir / filename, dpi=150, bbox_inches='tight')
+        print(f"Saved initial direction error plot to {results_dir / filename}")
+
+    # Print statistics to console
+    print("\n" + "="*60)
+    print("CIRCULAR STATISTICS FOR INITIAL DIRECTION ERROR")
+    print("="*60)
+
+    if stats_all:
+        print("\nALL TRIALS:")
+        print(f"  Circular mean: {stats_all['circular_mean']:.2f}°")
+        print(f"  Circular standard deviation: {stats_all['circular_std']:.2f}°")
+        print(f"  Mean resultant length (R): {stats_all['R']:.3f}")
+        print(f"    (R ranges from 0=uniform to 1=perfect clustering)")
+        print(f"\n  Rayleigh Test for Non-Uniformity:")
+        print(f"    H0: Angles uniformly distributed (no preferred direction)")
+        print(f"    H1: Angles clustered (preferred direction exists)")
+        print(f"    Z-statistic: {stats_all['rayleigh_z']:.3f}")
+        print(f"    p-value: {stats_all['rayleigh_p']:.6f}")
+        print(f"    Result: {'REJECT H0 - Significant clustering' if stats_all['rayleigh_p'] < 0.05 else 'Fail to reject H0'}")
+        print(f"\n  V-test for Clustering Around 0°:")
+        print(f"    H0: Distribution not clustered toward 0° (target direction)")
+        print(f"    H1: Distribution clustered toward 0° (movements toward target)")
+        print(f"    V-statistic: {stats_all['v_stat']:.3f}")
+        print(f"    p-value: {stats_all['v_p']:.6f}")
+        print(f"    Result: {'REJECT H0 - Movements biased toward target' if stats_all['v_p'] < 0.05 else 'Fail to reject H0'}")
+        print(f"  n={stats_all['n']}")
+
+    if stats_success:
+        print("\nSUCCESSFUL TRIALS:")
+        print(f"  Circular mean: {stats_success['circular_mean']:.2f}°")
+        print(f"  Circular standard deviation: {stats_success['circular_std']:.2f}°")
+        print(f"  Mean resultant length (R): {stats_success['R']:.3f}")
+        print(f"    (R ranges from 0=uniform to 1=perfect clustering)")
+        print(f"\n  Rayleigh Test for Non-Uniformity:")
+        print(f"    H0: Angles uniformly distributed (no preferred direction)")
+        print(f"    H1: Angles clustered (preferred direction exists)")
+        print(f"    Z-statistic: {stats_success['rayleigh_z']:.3f}")
+        print(f"    p-value: {stats_success['rayleigh_p']:.6f}")
+        print(f"    Result: {'REJECT H0 - Significant clustering' if stats_success['rayleigh_p'] < 0.05 else 'Fail to reject H0'}")
+        print(f"\n  V-test for Clustering Around 0°:")
+        print(f"    H0: Distribution not clustered toward 0° (target direction)")
+        print(f"    H1: Distribution clustered toward 0° (movements toward target)")
+        print(f"    V-statistic: {stats_success['v_stat']:.3f}")
+        print(f"    p-value: {stats_success['v_p']:.6f}")
+        print(f"    Result: {'REJECT H0 - Movements biased toward target' if stats_success['v_p'] < 0.05 else 'Fail to reject H0'}")
+        print(f"  n={stats_success['n']}")
+
+    if stats_failed:
+        print("\nFAILED TRIALS:")
+        print(f"  Circular mean: {stats_failed['circular_mean']:.2f}°")
+        print(f"  Circular standard deviation: {stats_failed['circular_std']:.2f}°")
+        print(f"  Mean resultant length (R): {stats_failed['R']:.3f}")
+        print(f"    (R ranges from 0=uniform to 1=perfect clustering)")
+        print(f"\n  Rayleigh Test for Non-Uniformity:")
+        print(f"    H0: Angles uniformly distributed (no preferred direction)")
+        print(f"    H1: Angles clustered (preferred direction exists)")
+        print(f"    Z-statistic: {stats_failed['rayleigh_z']:.3f}")
+        print(f"    p-value: {stats_failed['rayleigh_p']:.6f}")
+        print(f"    Result: {'REJECT H0 - Significant clustering' if stats_failed['rayleigh_p'] < 0.05 else 'Fail to reject H0'}")
+        print(f"\n  V-test for Clustering Around 0°:")
+        print(f"    H0: Distribution not clustered toward 0° (target direction)")
+        print(f"    H1: Distribution clustered toward 0° (movements toward target)")
+        print(f"    V-statistic: {stats_failed['v_stat']:.3f}")
+        print(f"    p-value: {stats_failed['v_p']:.6f}")
+        print(f"    Result: {'REJECT H0 - Movements biased toward target' if stats_failed['v_p'] < 0.05 else 'Fail to reject H0'}")
+        print(f"  n={stats_failed['n']}")
+
+    # Print statistics for biggest 4 targets
+    print("\n" + "-"*60)
+    print("BIGGEST 4 TARGETS ONLY")
+    print("-"*60)
+    print(f"Target sizes: {biggest_4_sizes}")
+
+    if stats_all_big4:
+        print("\nALL TRIALS (BIG 4):")
+        print(f"  Circular mean: {stats_all_big4['circular_mean']:.2f}°")
+        print(f"  Circular standard deviation: {stats_all_big4['circular_std']:.2f}°")
+        print(f"  Mean resultant length (R): {stats_all_big4['R']:.3f}")
+        print(f"  Rayleigh p-value: {stats_all_big4['rayleigh_p']:.6f}")
+        print(f"  V-test p-value: {stats_all_big4['v_p']:.6f}")
+        print(f"  n={stats_all_big4['n']}")
+
+    if stats_success_big4:
+        print("\nSUCCESSFUL TRIALS (BIG 4):")
+        print(f"  Circular mean: {stats_success_big4['circular_mean']:.2f}°")
+        print(f"  Circular standard deviation: {stats_success_big4['circular_std']:.2f}°")
+        print(f"  Mean resultant length (R): {stats_success_big4['R']:.3f}")
+        print(f"  Rayleigh p-value: {stats_success_big4['rayleigh_p']:.6f}")
+        print(f"  V-test p-value: {stats_success_big4['v_p']:.6f}")
+        print(f"  n={stats_success_big4['n']}")
+
+    if stats_failed_big4:
+        print("\nFAILED TRIALS (BIG 4):")
+        print(f"  Circular mean: {stats_failed_big4['circular_mean']:.2f}°")
+        print(f"  Circular standard deviation: {stats_failed_big4['circular_std']:.2f}°")
+        print(f"  Mean resultant length (R): {stats_failed_big4['R']:.3f}")
+        print(f"  Rayleigh p-value: {stats_failed_big4['rayleigh_p']:.6f}")
+        print(f"  V-test p-value: {stats_failed_big4['v_p']:.6f}")
+        print(f"  n={stats_failed_big4['n']}")
+
+    print("="*60)
 
     return fig
 
@@ -2293,7 +3821,8 @@ def plot_final_positions_by_target(trials: list[dict], min_duration: float = 0.0
 
 def compare_left_right_performance(trials: list[dict], left_x: float = -0.7, right_x: float = 0.7,
                                    tolerance: float = 0.1, results_dir: Optional[Path] = None,
-                                   animal_id: Optional[str] = None, session_date: str = "") -> tuple:
+                                   animal_id: Optional[str] = None, session_date: str = "",
+                                   random_walk_results: Optional[dict] = None) -> tuple:
     """Compare performance metrics for left vs right target trials.
 
     Parameters
@@ -2312,6 +3841,10 @@ def compare_left_right_performance(trials: list[dict], left_x: float = -0.7, rig
         Animal identifier for filename
     session_date : str, optional
         Session date for title
+    random_walk_results : dict, optional
+        Pre-computed random walk chance performance results from
+        calculate_random_walk_chance_performance(). If provided, uses
+        the overall_chance value for both left and right targets.
 
     Returns
     -------
@@ -2389,18 +3922,25 @@ def compare_left_right_performance(trials: list[dict], left_x: float = -0.7, rig
     ]
     success_odds_ratio, success_p = scipy_stats.fisher_exact(contingency_table)
 
-    # Calculate chance levels for left and right separately
-    print("  Calculating chance level for left targets (1000 shuffles)...")
-    left_chance = calculate_chance_level(trials, n_shuffles=1000,
-                                         target_filter=lambda t: abs(t['target_x'] - left_x) < tolerance,
-                                         results_dir=results_dir)
-    print(f"  Left chance level: {100*left_chance:.1f}%")
-
-    print("  Calculating chance level for right targets (1000 shuffles)...")
-    right_chance = calculate_chance_level(trials, n_shuffles=1000,
-                                          target_filter=lambda t: abs(t['target_x'] - right_x) < tolerance,
-                                          results_dir=results_dir)
-    print(f"  Right chance level: {100*right_chance:.1f}%")
+    # Use random walk chance level (same for both left and right)
+    if random_walk_results is not None:
+        # Use pre-computed random walk results
+        left_chance = random_walk_results['overall_chance']
+        right_chance = random_walk_results['overall_chance']
+        print(f"  Using pre-computed random walk chance level: {100*left_chance:.1f}%")
+        print(f"  Left chance level: {100*left_chance:.1f}%")
+        print(f"  Right chance level: {100*right_chance:.1f}%")
+    else:
+        # Calculate random walk chance if not provided
+        print("  Calculating random walk chance performance (100 simulations per trial)...")
+        rw_results = calculate_random_walk_chance_performance(
+            trials, n_simulations=100, results_dir=results_dir
+        )
+        left_chance = rw_results['overall_chance']
+        right_chance = rw_results['overall_chance']
+        print(f"  Random walk chance level: {100*left_chance:.1f}%")
+        print(f"  Left chance level: {100*left_chance:.1f}%")
+        print(f"  Right chance level: {100*right_chance:.1f}%")
 
     # Create comparison plot
     fig, axes = plt.subplots(2, 3, figsize=(18, 10))
@@ -2495,7 +4035,7 @@ def compare_left_right_performance(trials: list[dict], left_x: float = -0.7, rig
     ax.set_title(f'Success/Failure Rates\np = {success_p:.4f}', fontsize=12, fontweight='bold')
     ax.set_ylim(0, max(success_counts) * 1.3)
     ax.grid(True, alpha=0.3, axis='y')
-    ax.legend([bars[0], bars[1], bars[2]], ['Success', 'Failure', 'Chance'], loc='upper right', fontsize=9)
+    ax.legend([bars[0], bars[1], bars[2]], ['Success', 'Failure', 'RW Chance'], loc='upper right', fontsize=9)
 
     # Plot 5: Summary statistics table
     ax = axes[1, 2]
@@ -3016,15 +4556,13 @@ def plot_visible_invisible_detailed_stats(trials: list[dict], results_dir: Optio
     return fig, stats_dict
 
 
-
-# Fixation detection parameters - shared across analysis functions
-FIXATION_MIN_DURATION = 0.65  # seconds
-FIXATION_MAX_MOVEMENT = 0.2  # stimulus units
 def interactive_fixation_viewer(trials: list[dict], animal_id: Optional[str] = None,
-                                 session_date: str = "", 
+                                 session_date: str = "",
                                  min_duration: float = FIXATION_MIN_DURATION,
-                                 max_movement: float = FIXATION_MAX_MOVEMENT):
-    """Interactive viewer showing detected fixations for each trial.
+                                 max_movement: float = FIXATION_MAX_MOVEMENT,
+                                 show_random_walk: bool = True,
+                                 velocity_threshold: float = 2.0):
+    """Interactive viewer showing detected fixations for each trial with random walk comparison.
 
     Detects periods where eyes moved less than max_movement units for at least
     min_duration seconds, and highlights those points on the trajectory.
@@ -3042,9 +4580,13 @@ def interactive_fixation_viewer(trials: list[dict], animal_id: Optional[str] = N
     session_date : str, optional
         Session date for title
     min_duration : float
-        Minimum fixation duration in seconds (default: 0.45)
+        Minimum fixation duration in seconds (default: 0.7)
     max_movement : float
-        Maximum movement threshold for fixation in stimulus units (default: 0.15)
+        Maximum movement threshold for fixation in stimulus units (default: 0.2)
+    show_random_walk : bool
+        Whether to show random walk simulation for comparison (default: True)
+    velocity_threshold : float
+        Velocity threshold for fixation/saccade classification in random walk (default: 2.0)
     """
     if len(trials) == 0:
         print("No trials to display")
@@ -3059,6 +4601,14 @@ def interactive_fixation_viewer(trials: list[dict], animal_id: Optional[str] = N
     print(f"Interactive Fixation Viewer: {len(trials_with_data)} trials")
     print(f"Fixation criteria: ≥{min_duration}s duration, frame-to-frame movement <{max_movement} units")
     print("Press SPACE to advance, ESC or 'q' to quit")
+
+    # Compute Markov model statistics once for all random walks
+    state_stats = None
+    if show_random_walk:
+        print("Computing movement statistics for random walk generation...")
+        state_stats = compute_movement_statistics_with_states(trials, velocity_threshold)
+        print(f"  Fixation samples: {len(state_stats['fixation_velocities'])}")
+        print(f"  Saccade samples: {len(state_stats['saccade_velocities'])}")
 
     fig, ax = plt.subplots(figsize=(12, 10))
     current_trial_idx = [0]  # Use list to allow modification in nested function
@@ -3081,6 +4631,20 @@ def interactive_fixation_viewer(trials: list[dict], animal_id: Optional[str] = N
 
         is_failed = trial.get('trial_failed', False)
         target_visible = trial.get('target_visible', 1)
+
+        # Generate random walk simulation if requested
+        if show_random_walk and state_stats is not None:
+            start_x = eye_x[0]
+            start_y = eye_y[0]
+            duration = eye_times[-1] - eye_times[0]
+
+            rw_x, rw_y, rw_times = simulate_markov_random_walk_trial(
+                start_x, start_y, duration, state_stats, dt_mean=0.05
+            )
+
+            # Plot random walk trajectory (gray, dashed, thin)
+            ax.plot(rw_x, rw_y, '--', color='lightgray', linewidth=2, alpha=0.6,
+                   label='Random walk', zorder=0)
 
         # Detect fixations (uses shared module-level function)
         fixations = detect_fixations(eye_x, eye_y, eye_times, min_duration, max_movement)
@@ -3428,8 +4992,8 @@ def save_detailed_fixation_data(trials: list[dict], results_dir: Optional[Path] 
 
 
 def calculate_and_validate_trial_success(trials: list[dict], eot_df: pd.DataFrame,
-                                         min_fixation_duration: float = 0.65,
-                                         max_movement: float = 0.1) -> pd.DataFrame:
+                                         min_fixation_duration: float = FIXATION_MIN_DURATION,
+                                         max_movement: float = FIXATION_MAX_MOVEMENT) -> pd.DataFrame:
     """Calculate trial success from fixation data and compare to actual trial success.
 
     For each trial, this function:
@@ -3443,7 +5007,7 @@ def calculate_and_validate_trial_success(trials: list[dict], eot_df: pd.DataFram
     - Fixation detected when consecutive frame-to-frame movements < max_movement
     - Uses ONLY the LAST fixation detected
     - Fixation must END on target (last point within contact_threshold: target_radius + cursor_radius)
-    - Fixation duration must be >= min_fixation_duration (default: 0.65s)
+    - Fixation duration must be >= min_fixation_duration (default: 0.7s)
 
     NOTE: In prosaccade trials, there should ideally be only one fixation:
     - A fixation inside the target should end the trial with success
@@ -3457,7 +5021,7 @@ def calculate_and_validate_trial_success(trials: list[dict], eot_df: pd.DataFram
     eot_df : pd.DataFrame
         End-of-trial dataframe with actual trial_success column (2=success, !=2=failed)
     min_fixation_duration : float
-        Minimum fixation duration required for success (default: 0.65 seconds)
+        Minimum fixation duration required for success (default: 0.7 seconds)
     max_movement : float
         Maximum frame-to-frame movement for fixation detection (default: 0.1 units)
 
@@ -4130,7 +5694,7 @@ def analyze_folder(folder_path: str | Path, results_dir: Optional[str | Path] = 
         return pd.DataFrame()
 
     # Validate trial success calculation from fixation data
-    validation_df = calculate_and_validate_trial_success(trials_all, eot_df, min_fixation_duration=0.65)
+    validation_df = calculate_and_validate_trial_success(trials_all, eot_df)
 
     # Save validation results to CSV
     if results_dir is not None:
@@ -4139,16 +5703,24 @@ def analyze_folder(folder_path: str | Path, results_dir: Optional[str | Path] = 
         validation_df.to_csv(validation_filepath, index=False)
         print(f"Saved validation results to: {validation_filepath}")
 
+    # Calculate random walk chance performance (used by both trial success and psychometric plots)
+    print("\nCalculating random walk chance performance (100 simulations per trial)...")
+    random_walk_results = calculate_random_walk_chance_performance(
+        trials_all, n_simulations=100, results_dir=results_dir
+    )
+
     # Plot trial success summary (uses ALL trials, independent of --include-failed-trials flag)
     print("\nGenerating trial success summary plot...")
-    fig_success = plot_trial_success(eot_df, results_dir, animal_id, date_str, trials=trials_all, session_time=session_time)
+    fig_success = plot_trial_success(eot_df, results_dir, animal_id, date_str,
+                                     trials=trials_all, session_time=session_time,
+                                     random_walk_results=random_walk_results)
     if fig_success is not None:
         if show_plots:
             plt.show()
         plt.close(fig_success)
 
 
-    
+
     # NEW: Create vstim_go_fixation CSV (single source of truth for fixation detection)
     vstim_go_fixation_df = create_vstim_go_fixation_csv(folder_path, results_dir=results_dir,
                                                          animal_id=animal_id,
@@ -4156,7 +5728,9 @@ def analyze_folder(folder_path: str | Path, results_dir: Optional[str | Path] = 
 
     # Plot psychometric curve (success rate vs target diameter)
     print("\nGenerating psychometric curve...")
-    fig_psychometric = plot_psychometric_curve(eot_df, target_df_all, results_dir, animal_id, date_str, session_time=session_time)
+    fig_psychometric = plot_psychometric_curve(eot_df, target_df_all, results_dir, animal_id, date_str,
+                                               session_time=session_time,
+                                               random_walk_chance=random_walk_results)
     if fig_psychometric is not None:
         if show_plots:
             plt.show()
@@ -4189,7 +5763,8 @@ def analyze_folder(folder_path: str | Path, results_dir: Optional[str | Path] = 
                                                            right_x=detected_right_x,
                                                            results_dir=results_dir,
                                                            animal_id=animal_id,
-                                                           session_date=date_str)
+                                                           session_date=date_str,
+                                                           random_walk_results=random_walk_results)
     else:
         print(f"  Not enough unique X positions for left/right comparison")
         fig_lr, lr_stats = None, None
@@ -4278,11 +5853,30 @@ def analyze_folder(folder_path: str | Path, results_dir: Optional[str | Path] = 
             plt.show()
         plt.close(fig_final_pos)
 
+    print("\nPlotting initial direction error (success vs failure)...")
+    fig_dir_error = plot_initial_direction_error(trials_all, results_dir=results_dir,
+                                                  animal_id=animal_id,
+                                                  session_date=date_str)
+    if fig_dir_error is not None:
+        if show_plots:
+            plt.show()
+        plt.close(fig_dir_error)
+
+    print("\nPlotting path efficiency (success vs failure)...")
+    fig_path_eff = plot_path_efficiency(trials_all, results_dir=results_dir,
+                                        animal_id=animal_id,
+                                        session_date=date_str)
+    if fig_path_eff is not None:
+        if show_plots:
+            plt.show()
+        plt.close(fig_path_eff)
+
+
 
     # Create summary DataFrame
     durations = [t['duration'] for t in trials_for_analysis]
     path_lengths = [t['path_length'] for t in trials_for_analysis]
-    efficiencies = [t['path_efficiency'] for t in trials_for_analysis]
+    efficiencies = [t['path_efficiency'] for t in trials_for_analysis if not np.isnan(t['path_efficiency']) and t['path_efficiency'] <= 1.0]
     dir_errors = [t['initial_direction_error'] for t in trials_for_analysis if not np.isnan(t['initial_direction_error'])]
 
     df = pd.DataFrame({
@@ -4298,8 +5892,8 @@ def analyze_folder(folder_path: str | Path, results_dir: Optional[str | Path] = 
         'mean_path_length': [np.mean(path_lengths)],
         'median_path_length': [np.median(path_lengths)],
         'std_path_length': [np.std(path_lengths)],
-        'mean_path_efficiency': [np.mean(efficiencies)],
-        'median_path_efficiency': [np.median(efficiencies)],
+        'mean_path_efficiency': [np.mean(efficiencies) if efficiencies else np.nan],
+        'median_path_efficiency': [np.median(efficiencies) if efficiencies else np.nan],
         'mean_initial_dir_error': [np.mean(dir_errors) if dir_errors else np.nan],
         'median_initial_dir_error': [np.median(dir_errors) if dir_errors else np.nan],
     })
@@ -4366,13 +5960,13 @@ def main(session_id: str, trial_min_duration: float = 0.01, trial_max_duration: 
 
 # Usage Examples:
 # 1. With session manifest:
-#    python Clean/Python/analysis/prosaccade_feedback_session.py SESSION_ID
+#    python Python/analysis/prosaccade_feedback_session.py SESSION_ID
 #
 # 2. Direct folder (Linux/Mac):
-#    python Clean/Python/analysis/prosaccade_feedback_session.py --folder /path/to/data --animal Tsh001
+#    python Python/analysis/prosaccade_feedback_session.py --folder /path/to/data --animal Tsh001
 #
 # 3. Direct folder (Windows - no quotes needed on command line):
-#    python Clean/Python/analysis/prosaccade_feedback_session.py --folder X:\path\to\data --animal Tsh001
+#    python Python/analysis/prosaccade_feedback_session.py --folder X:\path\to\data --animal Tsh001
 #
 # Note: On command line, DO NOT use Python string syntax like r'...' or '...'
 #       Just provide the path directly without quotes (unless path has spaces)
