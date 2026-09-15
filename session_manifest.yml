@@ -506,3 +506,15 @@ sessions:
           reward_window: 0.8 #reward window in seconds
           scoring_mode: multi_attempt
 
+ Orion_2026-09-14T15_45_54:
+    experiment_type: prosaccade
+    session_path: X:\Experimental_Data\EyeHeadCoupling_RatTS_server\Orion_server\Orion_2026-09-14T15_45_54
+    calibration_factor : 4.0
+    ttl_freq: 60
+    camera_side: R
+    params:
+      saccade_config:
+        saccade_threshold: 1.0
+      reward_contingency:
+          reward_window: 1.0 #reward window in seconds
+          scoring_mode: single_shot

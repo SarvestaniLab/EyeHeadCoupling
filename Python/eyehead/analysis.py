@@ -79,6 +79,14 @@ def calibrate_eye_position(data: SessionData, config: SessionConfig) -> np.ndarr
     marker2_x, marker2_y = oc[:, 4], oc[:, 5]
     gaze_x, gaze_y = ec[:, 2], ec[:, 3]
 
+    # Interpolate NaNs in gaze and marker positions; Interpolating gaze positions may introduce artifacts, so we skip it for now.
+    # gaze_x = interpolate_nans(gaze_x)
+    # gaze_y = interpolate_nans(gaze_y)
+    marker1_x = interpolate_nans(marker1_x)
+    marker1_y = interpolate_nans(marker1_y)
+    marker2_x = interpolate_nans(marker2_x)
+    marker2_y = interpolate_nans(marker2_y)
+
     eye_origin = np.column_stack(((marker1_x + marker2_x) / 2.0,
                                   (marker1_y + marker2_y) / 2.0))
     eye_camera = np.column_stack((gaze_x - eye_origin[:, 0],
@@ -98,6 +106,9 @@ def calibrate_eye_position(data: SessionData, config: SessionConfig) -> np.ndarr
     eye_camera[:, 0] /= fx
     eye_camera[:, 1] /= fy
     eye_camera[:, 1] *= -1
+
+    if config.camera_side == "R":
+        eye_camera[:, 0] *= -1
 
     return eye_camera
 
