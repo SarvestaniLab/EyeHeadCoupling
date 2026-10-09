@@ -329,6 +329,166 @@ sessions:
         saccade_threshold: 1.0
 
 ############################################################################  Prosaccade sessions
+
+###### August 2026 sessions. First saccade ends the task, saccades in the direction of target are rewarded.
+###### Reward window is 1 sec. Targets are L/R, randomly presented.
+###### These are the sessions of the paper's Figure 3; the frozen copies the figure scripts read are in
+###### Python/paper_figures/paper_manifest.yml. reward_angle and congruency_window are written out for
+###### each session so they keep the values they were analysed with, whatever the defaults above are.
+#Apollo
+ Tsh002_2026-08-12T15_13_50:
+    experiment_type: prosaccade
+    session_path: X:\Experimental_Data\EyeHeadCoupling_RatTS_server\TSh02_Apollo_server\Tsh002_2026-08-12T15_13_50
+    calibration_factor : 3.76
+    ttl_freq: 60
+    camera_side: L
+    params:
+      saccade_config:
+        saccade_threshold: 1.5
+      reward_contingency:
+        reward_angle: 90 #half-width (deg) of the rewarded zone
+        congruency_window: [0.0, 1.0]
+        reward_window: 1.0 #reward window in seconds
+        scoring_mode: single_shot
+
+ Tsh002_2026-08-13T16_56_38:
+    experiment_type: prosaccade
+    session_path: X:\Experimental_Data\EyeHeadCoupling_RatTS_server\TSh02_Apollo_server\Tsh002_2026-08-13T16_56_38
+    calibration_factor : 3.76
+    ttl_freq: 60
+    camera_side: L
+    params:
+      saccade_config:
+        saccade_threshold: 1.5
+      reward_contingency:
+        reward_angle: 90 #half-width (deg) of the rewarded zone
+        congruency_window: [0.0, 1.0]
+        reward_window: 1.0 #reward window in seconds
+        scoring_mode: single_shot
+
+ Tsh002_2026-08-14T15_26_31:
+    experiment_type: prosaccade
+    session_path: X:\Experimental_Data\EyeHeadCoupling_RatTS_server\TSh02_Apollo_server\Tsh002_2026-08-14T15_26_31
+    calibration_factor : 3.76
+    ttl_freq: 60
+    camera_side: L
+    params:
+      saccade_config:
+        saccade_threshold: 1.5
+      reward_contingency:
+        reward_angle: 90 #half-width (deg) of the rewarded zone
+        congruency_window: [0.0, 1.0]
+        reward_window: 1.0 #reward window in seconds
+        scoring_mode: single_shot
+ 
+ Tsh002_2026-08-17T17_37_01:
+    experiment_type: prosaccade
+    session_path: X:\Experimental_Data\EyeHeadCoupling_RatTS_server\TSh02_Apollo_server\Tsh002_2026-08-17T17_37_01
+    calibration_factor : 3.76
+    ttl_freq: 60
+    camera_side: L
+    params:
+      saccade_config:
+        saccade_threshold: 1.5
+      reward_contingency:
+        reward_angle: 90 #half-width (deg) of the rewarded zone
+        congruency_window: [0.0, 1.0]
+        reward_window: 1.0 #reward window in seconds
+        scoring_mode: single_shot
+
+ Tsh002_2026-08-19T12_49_59:
+    experiment_type: prosaccade
+    session_path: X:\Experimental_Data\EyeHeadCoupling_RatTS_server\TSh02_Apollo_server\Tsh002_2026-08-19T12_49_59
+    calibration_factor : 3.76
+    ttl_freq: 60
+    camera_side: L
+    params:
+      saccade_config:
+        saccade_threshold: 1.5
+      reward_contingency:
+        reward_angle: 90 #half-width (deg) of the rewarded zone
+        congruency_window: [0.0, 1.0]
+        reward_window: 1.0 #reward window in seconds
+        scoring_mode: single_shot
+
+
+#Paris
+ Tsh001_2026-08-21T13_19_22:
+    experiment_type: prosaccade
+    session_path: X:\Experimental_Data\EyeHeadCoupling_RatTS_server\TSh01_Paris_server\Tsh001_2026-08-21T13_19_22
+    calibration_factor : 3.76
+    ttl_freq: 60
+    camera_side: L
+    params:
+      saccade_config:
+        saccade_threshold: 1.5
+      reward_contingency:
+        reward_angle: 90 #half-width (deg) of the rewarded zone
+        congruency_window: [0.0, 1.0]
+        reward_window: 1.0 #reward window in seconds
+        scoring_mode: single_shot
+
+ Tsh001_2026-08-21T13_29_49:
+    experiment_type: prosaccade
+    session_path: X:\Experimental_Data\EyeHeadCoupling_RatTS_server\TSh01_Paris_server\Tsh001_2026-08-21T13_29_49
+    calibration_factor : 3.76
+    ttl_freq: 60
+    camera_side: L
+    params:
+      saccade_config:
+        saccade_threshold: 1.5
+      reward_contingency:
+        reward_angle: 90 #half-width (deg) of the rewarded zone
+        congruency_window: [0.0, 1.0]
+        reward_window: 1.0 #reward window in seconds
+        scoring_mode: single_shot
+
+ Tsh001_2026-08-24T16_34_46:
+    experiment_type: prosaccade
+    session_path: X:\Experimental_Data\EyeHeadCoupling_RatTS_server\TSh01_Paris_server\Tsh001_2026-08-24T16_34_46
+    calibration_factor : 3.76
+    ttl_freq: 60
+    camera_side: L
+    params:
+      saccade_config:
+        saccade_threshold: 1.5
+      reward_contingency:
+        reward_angle: 90 #half-width (deg) of the rewarded zone
+        congruency_window: [0.0, 1.0]
+        reward_window: 1.0 #reward window in seconds
+        scoring_mode: single_shot
+
+ Tsh001_2026-08-26T14_56_48:
+    experiment_type: prosaccade
+    session_path: X:\Experimental_Data\EyeHeadCoupling_RatTS_server\TSh01_Paris_server\Tsh001_2026-08-26T14_56_48
+    calibration_factor : 3.76
+    ttl_freq: 60
+    camera_side: L
+    params:
+      saccade_config:
+        saccade_threshold: 1.5
+      reward_contingency:
+        reward_angle: 90 #half-width (deg) of the rewarded zone
+        congruency_window: [0.0, 1.0]
+        reward_window: 1.0 #reward window in seconds
+        scoring_mode: single_shot
+
+ Tsh001_2026-08-28T14_38_26:
+    experiment_type: prosaccade
+    session_path: X:\Experimental_Data\EyeHeadCoupling_RatTS_server\TSh01_Paris_server\Tsh001_2026-08-28T14_38_26
+    calibration_factor : 3.76
+    ttl_freq: 60
+    camera_side: L
+    params:
+      saccade_config:
+        saccade_threshold: 1.5
+      reward_contingency:
+        reward_angle: 90 #half-width (deg) of the rewarded zone
+        congruency_window: [0.0, 1.0]
+        reward_window: 1.0 #reward window in seconds
+        scoring_mode: single_shot
+
+###### Earlier prosaccade sessions
 #Apollo (first saccade ends the task, saccades in the direction of target are rewarded. reward window is 1.5 secs).
 #Targets are L/R, randomly presented
  Tsh002_2025-10-30T15_38_57:

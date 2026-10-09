@@ -58,22 +58,22 @@ from analysis.prosaccade_feedback_session import (
     identify_and_filter_failed_trials,
     extract_trial_trajectories
 )
+from paper_figures import paper_manifest
 
 # ---------------------------------------------------------------------------
-# Session folders to plot
+# Sessions to plot, and where to save
 # ---------------------------------------------------------------------------
-
-# Paris, 2026-01-13
-SESSION_FOLDERS = [
-    r"X:\Experimental_Data\EyeHeadCoupling_RatTS_server\TSh01_Paris_server\Tsh001_2026-01-13T13_26_58",
-    r"X:\Experimental_Data\EyeHeadCoupling_RatTS_server\TSh01_Paris_server\Tsh001_2026-01-13T13_00_15",
-    r"X:\Experimental_Data\EyeHeadCoupling_RatTS_server\TSh01_Paris_server\Tsh001_2026-01-13T13_13_35",
-]
+# Both come from the paper manifest (paper_manifest.yml in this folder, block
+# "figures: Fig4S"), so they are frozen for the paper. Change them there, not
+# here. One row of heatmaps per session, top to bottom.
+_SESSIONS = [paper_manifest.session(session_id)
+             for session_id in paper_manifest.figure("Fig4S")["sessions"]]
+SESSION_FOLDERS = [session.folder_path for session in _SESSIONS]
+ANIMAL_IDS = [session.animal_id for session in _SESSIONS]
+RESULTS_DIR: Optional[Path] = paper_manifest.output_dir("Fig4S")  # set to None to draw without saving
 # ---------------------------------------------------------------------------
 # Other run settings
 # ---------------------------------------------------------------------------
-ANIMAL_ID = "Tsh001"
-RESULTS_DIR: Optional[Path] = Path(r"X:\Analysis\EyeHeadCoupling\Fig4S_fixation_heatmap")  # e.g. Path("results") to save the figure to disk
 SHOW_PLOT = True
 
 def plot_session_heatmap(ax, trials: list[dict], title: Optional[str] = None, show_xlabel: bool = False, show_ylabel: bool = True,
@@ -280,10 +280,10 @@ def plot_multi_session_heatmaps(session_folders: list[Path], animal_ids: list[st
     return fig
 
 def main():
-    """Run the multi-session heatmap comparison on the hardwired session folders.
+    """Run the multi-session heatmap comparison on the paper's sessions.
 
-    Edit ``SESSION_FOLDERS`` and the other constants near the top of this
-    file to change which sessions are plotted and how.
+    Which sessions are plotted, and where the figure is saved, are set in
+    ``paper_manifest.yml`` (block ``figures: Fig4S``).
     """
     session_folders = [Path(f) for f in SESSION_FOLDERS]
 
@@ -294,7 +294,7 @@ def main():
         if not folder.is_dir():
             raise NotADirectoryError(f"Path is not a directory: {folder}")
 
-    animal_ids = [ANIMAL_ID] * len(session_folders)
+    animal_ids = list(ANIMAL_IDS)
 
     # Create the plot
     fig = plot_multi_session_heatmaps(
