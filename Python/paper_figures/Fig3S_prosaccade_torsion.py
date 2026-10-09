@@ -58,7 +58,8 @@ from eyehead import (
     organize_stims,
     get_session_date_from_path,
 )
-from prosaccade_session import wilson_ci
+from analysis.prosaccade_session import wilson_ci
+from paper_figures import paper_manifest
 
 
 # --- Hardcoded torsion congruency convention --------------------------------
@@ -666,11 +667,39 @@ def main(session_id: str, show_plots: bool = True) -> Dict[str, object]:
     }
 
 
-# Usage: python Python/analysis/prosaccade_torsion.py SESSION_ID_OR_PATH
+# Usage: python Python/paper_figures/Fig3S_prosaccade_torsion.py
+#        runs every session listed for this figure in paper_manifest.yml (figures: Fig3S -> sessions)
+# Usage: python Python/paper_figures/Fig3S_prosaccade_torsion.py SESSION_ID_OR_PATH
+#        runs that one session instead
+#
+# A session that is one of the paper's (listed in paper_manifest.yml in this
+# folder) is always analysed with the frozen settings recorded there. Any
+# other session ID or folder is looked up in the live session_manifest.yml,
+# exactly as before this script moved here, so it still works as a
+# day-to-day tool on new sessions.
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Analyse torsional saccades across all stimulus directions (Left/Right/Up/Down)"
     )
-    parser.add_argument("session_id", help="Session identifier from session_manifest.yml, or a direct path to a session folder")
+    parser.add_argument(
+        "session_id", nargs="?", default=None,
+        help=("Session identifier (from paper_manifest.yml for one of the "
+              "paper's sessions, otherwise from session_manifest.yml), or a "
+              "direct path to a session folder. Omit to run every session "
+              "listed under 'figures: Fig3S' in paper_manifest.yml."),
+    )
     args = parser.parse_args()
-    main(args.session_id)
+    session_ids = [args.session_id] if args.session_id else paper_manifest.figure("Fig3S")["sessions"]
+    if not session_ids:
+        parser.error(
+            "no session given, and paper_manifest.yml lists none under "
+            "'figures: Fig3S' -> sessions. Add the figure's sessions there, "
+            "or pass a session ID or folder path."
+        )
+    paper_sessions = paper_manifest.load()["sessions"]
+    for session_id in session_ids:
+        if session_id in paper_sessions:
+            with paper_manifest.frozen():
+                main(session_id)
+        else:
+            main(session_id)

@@ -58,9 +58,22 @@ function needs updating to match — everything else in this script reads
 data ``main()``/``analyze_all_sessions()`` already computed, so has no such
 risk.
 
-Running this script re-analyzes every session in the manifest for
-``EXPERIMENT_TYPE`` (same cost as running ``prosaccade_population.py``
-itself) plus one extra pass over ``SESSION_ID`` for the arrow-plot data.
+Which sessions go into the figure is fixed by the PAPER manifest
+(``paper_manifest.yml`` in this folder, block ``figures: Fig3``), not by the
+live ``session_manifest.yml``: the example session for panels B/C, and --
+for panel D -- every session of the ``population`` experiment type listed
+there. Sessions added to the live manifest for ongoing experiments
+therefore never reach this figure.
+
+Panel D is read from the population cache, which is built by running the
+ordinary population pipeline on the paper's sessions::
+
+    python Python/analysis/prosaccade_population.py --manifest Python/paper_figures/paper_manifest.yml --quiet-session-plots
+
+The cache must hold exactly the paper's sessions; if it holds anything else
+(for instance because a run on the live manifest overwrote it) this script
+stops and says so rather than drawing a different population. Running this
+script itself costs one pass over ``SESSION_ID`` for the arrow-plot data.
 
 This script also builds a second, separate SUPPLEMENTARY figure: the
 per-animal breakdown. The main figure's population row pools every animal
@@ -72,10 +85,11 @@ cache in one run and saved to separate files.
 
 Usage
 -----
-No CLI arguments -- edit ``SESSION_ID``/``EXPERIMENT_TYPE``/``OUTPUT_STEM``
-near the top of this file directly, then run:
+No CLI arguments. The sessions and the output folder are set in
+``paper_manifest.yml`` (``figures: Fig3``); styling is set near the top of
+this file. Then run:
 
-    python Python/analysis/Fig3_prosaccade.py
+    python Python/paper_figures/Fig3_prosaccade.py
 """
 from __future__ import annotations
 
@@ -105,14 +119,19 @@ from eyehead import (
     organize_stims,
 )
 from eyehead.analysis import _draw_quiver_arrows
+from paper_figures import paper_manifest
 
 # ---------------------------------------------------------------------------
-# Run configuration — edit these directly rather than passing CLI args.
+# Run configuration
 # ---------------------------------------------------------------------------
-SESSION_ID = "Tsh002_2026-08-19T12_49_59"  #Apollo sessions B/C
-EXPERIMENT_TYPE = "prosaccade"  # pooled across every animal in the manifest -- panel D
-OUTPUT_STEM = None  # None -> <results_root>/<EXPERIMENT_TYPE>_summary_figure; or set an explicit Path/str
-SUPPLEMENT_OUTPUT_STEM = None  # None -> <results_root>/<EXPERIMENT_TYPE>_supplement_per_animal; or an explicit Path/str
+### The sessions and the output folder come from the paper manifest
+### (paper_manifest.yml in this folder, block "figures: Fig3"), so they are
+### frozen for the paper. Change them there, not here.
+_FIGURE = paper_manifest.figure("Fig3")
+SESSION_ID = _FIGURE["example_session"]  # panels B/C
+EXPERIMENT_TYPE = _FIGURE["population"]  # panel D: every paper session of this type, all animals pooled
+OUTPUT_STEM = None  # None -> <this figure's output_dir>/<EXPERIMENT_TYPE>_summary_figure; or set an explicit Path/str
+SUPPLEMENT_OUTPUT_STEM = None  # None -> <this figure's output_dir>/<EXPERIMENT_TYPE>_supplement_per_animal; or an explicit Path/str
 
 # ---------------------------------------------------------------------------
 # Styling constants — tweak these to fit the final page/journal layout.
@@ -334,27 +353,49 @@ def _load_population_cache(experiment_type: str) -> dict:
     different file and is never picked up here by mistake.
 
     Raises a clear error, not a cryptic one, if the cache file doesn't
-    exist yet.
+    exist yet, or if it holds a different set of sessions from the paper
+    manifest's.
     """
-    root_dir = Path(__file__).resolve().parents[2]
-    manifest_path = root_dir / "session_manifest.yml"
-    with manifest_path.open("r", encoding="utf-8") as fh:
-        manifest = yaml.safe_load(fh) or {}
-    results_root = Path(manifest.get("results_root") or root_dir)
+    rebuild_command = (
+        f"python Python/analysis/prosaccade_population.py "
+        f"--manifest Python/paper_figures/{paper_manifest.PAPER_MANIFEST.name} "
+        f"--quiet-session-plots"
+    )
+    results_root = paper_manifest.results_root()
 
     cache_path = results_root / f"{experiment_type}_population_cache_all_animals.pkl"
     if not cache_path.exists():
         raise FileNotFoundError(
-            f"No population cache found at {cache_path}. Run "
-            f"prosaccade_population.py (without --animal-name, so every "
-            f"animal is included) first to generate it."
+            f"No population cache found at {cache_path}. Generate it from the "
+            f"paper's sessions with:\n    {rebuild_command}"
         )
 
     mtime = datetime.fromtimestamp(cache_path.stat().st_mtime)
     print(f"Loading population cache from {cache_path} (saved {mtime:%Y-%m-%d %H:%M})")
     with cache_path.open("rb") as fh:
-        return pickle.load(fh)
+        cache = pickle.load(fh)
 
+    ### The freeze, enforced. The cache is a file any population run can
+    ### overwrite -- including a routine run on the live manifest after new
+    ### sessions were added. Drawing from that would silently change the
+    ### paper's population, so the cached sessions must be exactly the
+    ### paper manifest's (selected the same way the cache builder selects
+    ### them: by experiment-type prefix).
+    expected = sorted(paper_manifest.sessions_of_type(experiment_type, match_prefix=True))
+    cached = sorted(cache["session_results"])
+    if cached != expected:
+        raise ValueError(
+            f"The population cache at {cache_path} does not match the paper "
+            f"manifest.\n"
+            f"  in the cache but not in the paper manifest: "
+            f"{sorted(set(cached) - set(expected)) or 'none'}\n"
+            f"  in the paper manifest but not in the cache: "
+            f"{sorted(set(expected) - set(cached)) or 'none'}\n"
+            f"Rebuild it from the paper's sessions with:\n    {rebuild_command}"
+        )
+    return cache
+
+@paper_manifest.uses_paper_manifest
 def _load_session_quiver_data(session_id: str) -> dict:
     """Per-trial Left/Right arrow-plot ingredients for one session.
 
@@ -1001,17 +1042,13 @@ def build_supplement_figure(experiment_type: str):
 
 
 def _resolve_out_stem(explicit, default_name):
-    """Output path stem: ``explicit`` when set, else ``<results_root>``
-    from the manifest with ``default_name``."""
+    """Output path stem: ``explicit`` when set, else ``default_name`` inside
+    this figure's ``output_dir`` from the paper manifest."""
     if explicit:
         return Path(explicit)
-    root_dir = Path(__file__).resolve().parents[2]
-    manifest_path = root_dir / "session_manifest.yml"
-    with manifest_path.open("r", encoding="utf-8") as fh:
-        manifest = yaml.safe_load(fh) or {}
-    results_root = Path(manifest.get("results_root") or root_dir)
-    results_root.mkdir(parents=True, exist_ok=True)
-    return results_root / default_name
+    out_dir = paper_manifest.output_dir("Fig3")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    return out_dir / default_name
 
 
 def _save(fig, out_stem):

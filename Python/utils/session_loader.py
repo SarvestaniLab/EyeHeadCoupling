@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import re
+from contextlib import contextmanager
 from dataclasses import MISSING, dataclass, field, fields
-from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from pathlib import Path, PureWindowsPath
+from typing import Any, Dict, Iterable, Iterator, List, Optional
 
 import os
 import yaml
@@ -69,6 +70,80 @@ def _parse_date_from_path(session_path: str) -> Optional[str]:
     return match.group() if match else None
 
 
+# ---------------------------------------------------------------------------
+# Which manifest is in use
+# ---------------------------------------------------------------------------
+### Every function below reads sessions from one manifest file. By default
+### that is ``session_manifest.yml`` at the repo root: the live list, which
+### grows as experiments continue. Anything that must NOT move when that
+### list grows -- the paper's figures -- points the loader at a frozen
+### manifest of its own instead (``Python/paper_figures/paper_manifest.yml``),
+### so the same pipeline code serves both without either disturbing the
+### other.
+DEFAULT_MANIFEST = Path(__file__).resolve().parent.parent.parent / "session_manifest.yml"
+
+_active_manifest: Optional[Path] = None
+
+
+def get_manifest_path() -> Path:
+    """Path of the manifest the loader is currently reading.
+
+    In order of priority: the manifest set by :func:`using_manifest`, then
+    the ``EHC_MANIFEST`` environment variable, then ``session_manifest.yml``
+    at the repo root.
+    """
+    if _active_manifest is not None:
+        return _active_manifest
+    env_path = os.environ.get("EHC_MANIFEST")
+    return Path(env_path) if env_path else DEFAULT_MANIFEST
+
+
+@contextmanager
+def using_manifest(path: Path | str) -> Iterator[Path]:
+    """Read sessions from ``path`` instead of the default manifest, for the
+    duration of a ``with`` block::
+
+        with using_manifest(PAPER_MANIFEST):
+            config = load_session("Tsh002_2026-08-19T12_49_59")
+
+    The previous manifest is restored on exit, even after an error, so one
+    script (or test) switching manifests cannot leak into the next.
+    """
+    global _active_manifest
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Manifest not found: {path}")
+    previous = _active_manifest
+    _active_manifest = path
+    try:
+        yield path
+    finally:
+        _active_manifest = previous
+
+
+def load_manifest() -> Dict[str, Any]:
+    """Parsed contents of the manifest currently in use."""
+    with get_manifest_path().open("r", encoding="utf-8") as fh:
+        return yaml.safe_load(fh) or {}
+
+
+def _resolve_session_folder(folder: Optional[str], manifest: Dict[str, Any]) -> Optional[str]:
+    """A session's folder as an absolute path.
+
+    A manifest may give ``data_root`` once at the top and then list each
+    ``session_path`` relative to it, so moving the data (or handing the
+    manifest to someone with the data elsewhere) means editing one line.
+    Paths that are already absolute are returned unchanged, so manifests
+    without ``data_root`` behave exactly as before.
+    """
+    data_root = manifest.get("data_root")
+    if not folder or not data_root:
+        return folder
+    if Path(folder).is_absolute() or PureWindowsPath(folder).is_absolute():
+        return folder
+    return str(Path(data_root) / folder)
+
+
 def load_session(session_id: str) -> SessionConfig:
     """Load the configuration for ``session_id``.
 
@@ -85,15 +160,11 @@ def load_session(session_id: str) -> SessionConfig:
     Raises
     ------
     KeyError
-        If ``session_id`` is not present in ``session_manifest.yml``.
+        If ``session_id`` is not present in the manifest in use (see
+        :func:`get_manifest_path`).
     """
 
-    manifest_path = (
-        Path(__file__).resolve().parent.parent.parent / "session_manifest.yml"
-    )
-
-    with manifest_path.open("r", encoding="utf-8") as fh:
-        manifest: Dict[str, Any] = yaml.safe_load(fh) or {}
+    manifest: Dict[str, Any] = load_manifest()
 
     # Extract global defaults for saccade configuration, if provided.
     global_saccade_cfg: Dict[str, Any] = manifest.get("saccade_config", {}) or {}
@@ -114,7 +185,9 @@ def load_session(session_id: str) -> SessionConfig:
     except KeyError as exc:
         raise KeyError(f"Unknown session id: {session_id}") from exc
 
-    folder = data.get("folder_path") or data.get("session_path")
+    folder = _resolve_session_folder(
+        data.get("folder_path") or data.get("session_path"), manifest
+    )
     results = data.get("results_dir")
     if results is None and folder:
         if results_with_data:
@@ -229,9 +302,7 @@ def _build_config_from_folder(folder: Path) -> SessionConfig:
     available, but session-specific fields are derived from ``folder``
     instead of a manifest entry.
     """
-    manifest_path = (
-        Path(__file__).resolve().parent.parent.parent / "session_manifest.yml"
-    )
+    manifest_path = get_manifest_path()
     manifest: Dict[str, Any] = {}
     if manifest_path.exists():
         with manifest_path.open("r", encoding="utf-8") as fh:
@@ -407,9 +478,7 @@ def list_sessions_from_manifest(
         list is returned.
     """
 
-    manifest_path = (
-        Path(__file__).resolve().parent.parent.parent / "session_manifest.yml"
-    )
+    manifest_path = get_manifest_path()
 
     try:
         with manifest_path.open("r", encoding="utf-8") as fh:
@@ -450,6 +519,10 @@ def list_sessions_from_manifest(
 
 __all__ = [
     "SessionConfig",
+    "DEFAULT_MANIFEST",
+    "get_manifest_path",
+    "using_manifest",
+    "load_manifest",
     "load_session",
     "load_session_or_path",
     "_build_config_from_folder",

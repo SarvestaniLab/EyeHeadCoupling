@@ -1,0 +1,387 @@
+# =============================================================================
+# PAPER MANIFEST -- the sessions, settings and folders behind the paper's figures
+# =============================================================================
+# The scripts in Python/paper_figures/ read THIS file, not session_manifest.yml.
+#
+# session_manifest.yml (repo root) is the live list: it grows as experiments
+# continue, and its settings can change. This file is the frozen counterpart.
+# Adding sessions to the live list, or changing a setting there, cannot change
+# a paper figure. Edit this file only when the paper itself changes.
+#
+# It uses the same format as session_manifest.yml, so the ordinary pipeline can
+# be run against it:
+#     python Python/analysis/prosaccade_population.py --manifest Python/paper_figures/paper_manifest.yml
+#
+# Figure 5 (Fig5_cortex.py) uses no sessions: its inputs travel with the repo in
+# Python/paper_figures/Fig5_inputs/ and it writes next to itself.
+
+# -----------------------------------------------------------------------------
+# 1. FOLDERS -- the only lines to change when data or outputs live elsewhere
+# -----------------------------------------------------------------------------
+# Raw session folders. Every session_path below is relative to this.
+data_root: X:\Experimental_Data\EyeHeadCoupling_RatTS_server
+
+# Where the figure scripts save. Each figure's output_dir (section 3) is a
+# subfolder of this, unless it is written as a full path.
+figures_root: X:\Papers\Active_vision_ts
+
+# Where the pipeline writes per-session results and the Figure 3 population
+# cache when it is run with this manifest.
+results_root: X:\Papers\Active_vision_ts\Figure3_Saccades
+results_with_data: false
+
+# -----------------------------------------------------------------------------
+# 2. ANALYSIS SETTINGS -- frozen copies of the defaults the paper was run with
+# -----------------------------------------------------------------------------
+saccade_config:
+  saccade_threshold: 1.0
+  saccade_threshold_torsion: 1.5
+  blink_threshold: 10.0
+  blink_detection: 1
+
+# Prosaccade experiments
+reward_contingency:
+  reward_angle: 90               # half-width (deg) of the rewarded zone around the target direction
+  congruency_window: [0.0, 1.0]   # latency band (s) for the "fraction toward target" summary
+  reward_window: 1.1             # default reward window (s)
+  scoring_mode: single_shot
+
+# Fixation experiments
+max_interval_fixations: 1.0
+
+# Type assumed for a session that does not state one
+experiment_type: prosaccade
+
+# -----------------------------------------------------------------------------
+# 3. FIGURES -- which sessions each figure uses, and where it saves
+# -----------------------------------------------------------------------------
+# example_session / sessions / cued_sessions name entries from section 4.
+# population names an experiment_type: the figure pools EVERY session of that
+# type listed in section 4, so adding or removing one there changes the figure.
+figures:
+  Fig3:
+    output_dir: Figure3_Saccades
+    example_session: Tsh002_2026-08-19T12_49_59   # panels B and C
+    population: prosaccade                        # panel D and the per-animal supplement
+
+  Fig3S:                                          # torsion panels of Fig. S3 (C and D)
+    sessions:                                     # "Session 1", then "Session 2"
+      - Tsh001_2025-07-18T14_57_23
+      - Tsh001_2025-07-17T15_32_42
+    # No output_dir: this script saves into <results_root>/<session>/torsion/.
+
+  Fig4:
+    output_dir: Figure4_Fixation
+    cued_sessions:                                # panels B and C: top row, then bottom row
+      - Tsh002_2025-09-05T10_59_22
+      - Tsh002_2025-09-15T11_41_54
+    example_session: Tsh001_2025-11-24T14_28_34   # panels E and F
+    population: fixation_on_target                # panel G
+
+  Fig4S:
+    output_dir: X:\Analysis\EyeHeadCoupling\Fig4S_fixation_heatmap
+    sessions:                                     # one row of heatmaps each, top to bottom
+      - Tsh001_2026-01-13T13_26_58
+      - Tsh001_2026-01-13T13_00_15
+      - Tsh001_2026-01-13T13_13_35
+
+# -----------------------------------------------------------------------------
+# 4. SESSIONS -- with the settings each was analysed with
+# -----------------------------------------------------------------------------
+sessions:
+
+  # ---- Figure 3: saccade-to-target (prosaccade), Apollo ----------------------
+  Tsh002_2026-08-12T15_13_50:
+    experiment_type: prosaccade
+    session_path: TSh02_Apollo_server\Tsh002_2026-08-12T15_13_50
+    calibration_factor: 3.76
+    ttl_freq: 60
+    camera_side: L
+    params:
+      saccade_config:
+        saccade_threshold: 1.5
+      reward_contingency:
+        reward_window: 1.0
+        scoring_mode: single_shot
+
+  Tsh002_2026-08-13T16_56_38:
+    experiment_type: prosaccade
+    session_path: TSh02_Apollo_server\Tsh002_2026-08-13T16_56_38
+    calibration_factor: 3.76
+    ttl_freq: 60
+    camera_side: L
+    params:
+      saccade_config:
+        saccade_threshold: 1.5
+      reward_contingency:
+        reward_window: 1.0
+        scoring_mode: single_shot
+
+  Tsh002_2026-08-14T15_26_31:
+    experiment_type: prosaccade
+    session_path: TSh02_Apollo_server\Tsh002_2026-08-14T15_26_31
+    calibration_factor: 3.76
+    ttl_freq: 60
+    camera_side: L
+    params:
+      saccade_config:
+        saccade_threshold: 1.5
+      reward_contingency:
+        reward_window: 1.0
+        scoring_mode: single_shot
+
+  Tsh002_2026-08-17T17_37_01:
+    experiment_type: prosaccade
+    session_path: TSh02_Apollo_server\Tsh002_2026-08-17T17_37_01
+    calibration_factor: 3.76
+    ttl_freq: 60
+    camera_side: L
+    params:
+      saccade_config:
+        saccade_threshold: 1.5
+      reward_contingency:
+        reward_window: 1.0
+        scoring_mode: single_shot
+
+  Tsh002_2026-08-19T12_49_59:
+    experiment_type: prosaccade
+    session_path: TSh02_Apollo_server\Tsh002_2026-08-19T12_49_59
+    calibration_factor: 3.76
+    ttl_freq: 60
+    camera_side: L
+    params:
+      saccade_config:
+        saccade_threshold: 1.5
+      reward_contingency:
+        reward_window: 1.0
+        scoring_mode: single_shot
+
+  # ---- Figure 3: saccade-to-target (prosaccade), Paris -----------------------
+  Tsh001_2026-08-21T13_19_22:
+    experiment_type: prosaccade
+    session_path: TSh01_Paris_server\Tsh001_2026-08-21T13_19_22
+    calibration_factor: 3.76
+    ttl_freq: 60
+    camera_side: L
+    params:
+      saccade_config:
+        saccade_threshold: 1.5
+      reward_contingency:
+        reward_window: 1.0
+        scoring_mode: single_shot
+
+  Tsh001_2026-08-21T13_29_49:
+    experiment_type: prosaccade
+    session_path: TSh01_Paris_server\Tsh001_2026-08-21T13_29_49
+    calibration_factor: 3.76
+    ttl_freq: 60
+    camera_side: L
+    params:
+      saccade_config:
+        saccade_threshold: 1.5
+      reward_contingency:
+        reward_window: 1.0
+        scoring_mode: single_shot
+
+  Tsh001_2026-08-24T16_34_46:
+    experiment_type: prosaccade
+    session_path: TSh01_Paris_server\Tsh001_2026-08-24T16_34_46
+    calibration_factor: 3.76
+    ttl_freq: 60
+    camera_side: L
+    params:
+      saccade_config:
+        saccade_threshold: 1.5
+      reward_contingency:
+        reward_window: 1.0
+        scoring_mode: single_shot
+
+  Tsh001_2026-08-26T14_56_48:
+    experiment_type: prosaccade
+    session_path: TSh01_Paris_server\Tsh001_2026-08-26T14_56_48
+    calibration_factor: 3.76
+    ttl_freq: 60
+    camera_side: L
+    params:
+      saccade_config:
+        saccade_threshold: 1.5
+      reward_contingency:
+        reward_window: 1.0
+        scoring_mode: single_shot
+
+  Tsh001_2026-08-28T14_38_26:
+    experiment_type: prosaccade
+    session_path: TSh01_Paris_server\Tsh001_2026-08-28T14_38_26
+    calibration_factor: 3.76
+    ttl_freq: 60
+    camera_side: L
+    params:
+      saccade_config:
+        saccade_threshold: 1.5
+      reward_contingency:
+        reward_window: 1.0
+        scoring_mode: single_shot
+
+  # ---- Figure 4B-C: cued fixation, Apollo ------------------------------------
+  # fixation_ms is the fixation time the animal had to hold for reward.
+  Tsh002_2025-09-05T10_59_22:
+    experiment_type: fixation_learning
+    session_path: TSh02_Apollo_server\Tsh002_2025-09-05T10_59_22
+    fixation_ms: 400
+    calibration_factor: 3.76
+    ttl_freq: 60
+    camera_side: L
+    params:
+      saccade_config:
+        saccade_threshold: 1.0
+
+  Tsh002_2025-09-15T11_41_54:
+    experiment_type: fixation
+    session_path: TSh02_Apollo_server\Tsh002_2025-09-15T11_41_54
+    fixation_ms: 700
+    calibration_factor: 3.76
+    ttl_freq: 60
+    camera_side: L
+    params:
+      saccade_config:
+        saccade_threshold: 1.0
+
+  # ---- Figure 4E-G: fixation on target with gaze feedback, Paris -------------
+  # Only the folder and the required fixation time are used for these sessions.
+  Tsh001_2025-11-24T14_28_34:
+    experiment_type: fixation_on_target
+    session_path: TSh01_Paris_server\Tsh001_2025-11-24T14_28_34
+    fixation_ms: 500
+
+  Tsh001_2025-11-25T15_08_10:
+    experiment_type: fixation_on_target
+    session_path: TSh01_Paris_server\Tsh001_2025-11-25T15_08_10
+    fixation_ms: 500
+
+  Tsh001_2025-11-25T15_23_02:
+    experiment_type: fixation_on_target
+    session_path: TSh01_Paris_server\Tsh001_2025-11-25T15_23_02
+    fixation_ms: 500
+
+  Tsh001_2025-11-25T15_30_05:
+    experiment_type: fixation_on_target
+    session_path: TSh01_Paris_server\Tsh001_2025-11-25T15_30_05
+    fixation_ms: 500
+
+  Tsh001_2025-12-02T16_56_56:
+    experiment_type: fixation_on_target
+    session_path: TSh01_Paris_server\Tsh001_2025-12-02T16_56_56
+    fixation_ms: 500
+
+  Tsh001_2025-12-18T15_10_25:
+    experiment_type: fixation_on_target
+    session_path: TSh01_Paris_server\Tsh001_2025-12-18T15_10_25
+    fixation_ms: 400
+
+  Tsh001_2025-12-18T15_20_33:
+    experiment_type: fixation_on_target
+    session_path: TSh01_Paris_server\Tsh001_2025-12-18T15_20_33
+    fixation_ms: 700
+
+  Tsh001_2025-12-23T15_39_50:
+    experiment_type: fixation_on_target
+    session_path: TSh01_Paris_server\Tsh001_2025-12-23T15_39_50
+    fixation_ms: 500
+
+  # ---- Figure 4E-G: fixation on target with gaze feedback, Apollo ------------
+  Tsh002_2025-12-16T14_25_13:
+    experiment_type: fixation_on_target
+    session_path: TSh02_Apollo_server\Tsh002_2025-12-16T14_25_13
+    fixation_ms: 700
+
+  Tsh002_2025-12-16T14_39_30:
+    experiment_type: fixation_on_target
+    session_path: TSh02_Apollo_server\Tsh002_2025-12-16T14_39_30
+    fixation_ms: 500
+
+  Tsh002_2025-12-16T14_50_03:
+    experiment_type: fixation_on_target
+    session_path: TSh02_Apollo_server\Tsh002_2025-12-16T14_50_03
+    fixation_ms: 400
+
+  Tsh002_2025-12-24T16_06_01:
+    experiment_type: fixation_on_target
+    session_path: TSh02_Apollo_server\Tsh002_2025-12-24T16_06_01
+    fixation_ms: 500
+
+  Tsh002_2025-12-24T16_15_42:
+    experiment_type: fixation_on_target
+    session_path: TSh02_Apollo_server\Tsh002_2025-12-24T16_15_42
+    fixation_ms: 500
+
+  Tsh002_2025-12-24T16_35_12:
+    experiment_type: fixation_on_target
+    session_path: TSh02_Apollo_server\Tsh002_2025-12-24T16_35_12
+    fixation_ms: 500
+
+  # ---- Figure S4: gaze heatmaps for three target positions, Paris ------------
+  Tsh001_2026-01-13T13_26_58:
+    experiment_type: fixation_feedback
+    session_path: TSh01_Paris_server\Tsh001_2026-01-13T13_26_58
+    calibration_factor: 3.76
+    ttl_freq: 60
+    camera_side: L
+    params:
+      saccade_config:
+        saccade_threshold: 1.0
+
+  Tsh001_2026-01-13T13_00_15:
+    experiment_type: fixation_feedback
+    session_path: TSh01_Paris_server\Tsh001_2026-01-13T13_00_15
+    calibration_factor: 3.76
+    ttl_freq: 60
+    camera_side: L
+    params:
+      saccade_config:
+        saccade_threshold: 1.0
+
+  Tsh001_2026-01-13T13_13_35:
+    experiment_type: fixation_feedback
+    session_path: TSh01_Paris_server\Tsh001_2026-01-13T13_13_35
+    calibration_factor: 3.76
+    ttl_freq: 60
+    camera_side: L
+    params:
+      saccade_config:
+        saccade_threshold: 1.0
+
+  # ---- Figure S3: saccades to four target positions (torsion), Paris ---------
+  # Targets appeared left, right, up or down. The type is deliberately NOT
+  # "prosaccade": Figure 3 pools every session whose type starts with that, and
+  # these two must stay out of its population.
+  # Settings are the ones in force when the published panels were made
+  # (5 Aug 2026); with them the script reproduces those panels exactly. The
+  # torsion threshold in particular must stay 1.5: at 1.0 it detects roughly
+  # twice as many torsion saccades on left/right/down trials.
+  Tsh001_2025-07-18T14_57_23:
+    experiment_type: saccade_four_targets
+    session_path: TSh01_Paris_server\Tsh001_2025-07-18T14_57_23
+    calibration_factor: 3.76
+    ttl_freq: 60
+    camera_side: L
+    params:
+      saccade_config:
+        saccade_threshold: 2.0
+        saccade_threshold_torsion: 1.5
+      reward_contingency:
+        reward_window: 0.75
+        scoring_mode: multi_attempt
+
+  Tsh001_2025-07-17T15_32_42:
+    experiment_type: saccade_four_targets
+    session_path: TSh01_Paris_server\Tsh001_2025-07-17T15_32_42
+    calibration_factor: 3.76
+    ttl_freq: 60
+    camera_side: L
+    params:
+      saccade_config:
+        saccade_threshold: 2.0
+        saccade_threshold_torsion: 1.5
+      reward_contingency:
+        reward_window: 0.75
+        scoring_mode: multi_attempt

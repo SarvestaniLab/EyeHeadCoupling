@@ -20,6 +20,13 @@ dependencies:
   - pyqt
   - openjpeg=2.5.2
   - libtiff>=4.5.0,<4.7.0
+  # Required by paper_figures/Fig5_cortex.py: flat-map geometry (shapely),
+  # SVG path parsing (svgpathtools), retinotopy TIFF loading (tifffile)
+  # and skeletonize in mouse() (scikit-image, imported as skimage).
+  - shapely
+  - svgpathtools
+  - tifffile
+  - scikit-image
   # Tests: Python/tests/
   - pytest
   - pip

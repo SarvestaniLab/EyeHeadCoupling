@@ -125,6 +125,7 @@ import pickle
 import re
 import sys
 import warnings
+import os
 from collections import defaultdict
 from pathlib import Path
 
@@ -138,7 +139,7 @@ import matplotlib.pyplot as plt
 
 from analysis import prosaccade_session
 from analysis.prosaccade_session import main
-from utils.session_loader import load_session, list_sessions_from_manifest
+from utils.session_loader import load_manifest, load_session, list_sessions_from_manifest
 from eyehead.analysis import plot_left_right_angle
 
 assert main is prosaccade_session.main
@@ -676,6 +677,8 @@ def run_population_summary_plots(
 # Usage: python Python/analysis/prosaccade_population.py --animal-name Paris will print all Paris session figures too
 # Usage: python Python/analysis/prosaccade_population.py --animal-name Paris --quiet-session-plots will print only population
 # Usage: python Python/analysis/prosaccade_population.py --animal-name --quiet-session-plots will run each session, for each animal, and for all
+# Usage: python Python/analysis/prosaccade_population.py --manifest Python/paper_figures/paper_manifest.yml --quiet-session-plots
+#        runs the paper's frozen session list instead of session_manifest.yml (this is what builds the Figure 3 population cache)
 
 if __name__ == "__main__":
     
@@ -704,7 +707,22 @@ if __name__ == "__main__":
             "pop up, same as before."
         ),
     )
+    parser.add_argument(
+        "--manifest",
+        default=None,
+        help=(
+            "Manifest to take sessions, settings and results_root from, "
+            "instead of session_manifest.yml at the repo root. Use "
+            "Python/paper_figures/paper_manifest.yml to run the paper's "
+            "frozen session list."
+        ),
+    )
     args = parser.parse_args()
+    ### Every session lookup in the pipeline goes through
+    ### utils.session_loader, which honours EHC_MANIFEST; setting it here
+    ### switches this whole run to the requested manifest.
+    if args.manifest:
+        os.environ["EHC_MANIFEST"] = str(Path(args.manifest).resolve())
     (
         aggregated,
         left_angle_all,
@@ -720,9 +738,7 @@ if __name__ == "__main__":
     )
     root_dir = Path(__file__).resolve().parents[2]
 
-    manifest_path = root_dir / "session_manifest.yml"
-    with manifest_path.open("r", encoding="utf-8") as fh:
-        manifest = yaml.safe_load(fh) or {}
+    manifest = load_manifest()
 
     results_root = Path(manifest.get("results_root") or root_dir)
     results_root.mkdir(parents=True, exist_ok=True)

@@ -41,7 +41,7 @@ from matplotlib.colors import to_rgba
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from analysis import Fig3_prosaccade as fig3
+from paper_figures import Fig3_prosaccade as fig3
 from analysis import prosaccade_session
 
 
