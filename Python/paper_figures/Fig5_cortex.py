@@ -37,8 +37,9 @@ HOW EACH SPECIES IS HANDLED
       4. extends azimuth past the last drawn line (+10°) to the far edge of
          V1, which is taken to be 120° (Kaas et al. 1980). Values in between
          are spaced so that the cortex per degree falls off as a power law
-         of azimuth. This part is an extrapolation, not a measurement, and
-         is drawn dashed;
+         of azimuth, whose two constants the script derives itself (see
+         "HOW AZIMUTH BEYOND +10° IS CHOSEN" below). This part is an
+         extrapolation, not a measurement, and is drawn dashed;
       5. adds up the cortical area of the mesh triangles that fall within
          10°, 20° and 30° of the centre.
   Squirrel monkey — calculated, not measured (squirrelmonkey)
@@ -50,10 +51,40 @@ HOW EACH SPECIES IS HANDLED
     example dataset. V1 is outlined with those authors' visual-field-sign
     method, and the % of V1 pixels within 10°, 20° and 30° is counted.
 
+HOW AZIMUTH BEYOND +10° IS CHOSEN  (fit_azimuth_law)
+  The drawing stops at +10°, but V1 runs on to 120°, so 110° of azimuth has
+  to be laid out across the cortex that is left. Measured along the
+  horizontal meridian, the drawn 0-10° takes about 3.2 mm (0.32 mm per
+  degree) and only about 2.4 mm remain for the other 110°. The layout is a
+  law, cortex per degree M(az) ∝ ((az + e2)/e2)^-k, and its two constants
+  are fitted to balance two things that cannot both be had:
+    even spacing   the dashed contours (20, 30, 45, 60, 90, 120°) sit at
+                   equal steps across the remaining cortex, so the periphery
+                   stays legible instead of piling up at the border;
+    continuity     cortex per degree just beyond +10° matches the drawn grid
+                   just inside it, so there is no jump at the join.
+  One number sets the balance: LAW_LAMBDA, the weight on continuity. At the
+  chosen 1.0 the fit gives a plain power law (e2 → 0, k ≈ 1.02): cortex per
+  degree still drops about 3-fold at the join, and 10-20° takes 28% of the
+  remaining cortex. summary.json tabulates the other weights in LAW_SWEEP.
+
+  What depends on this choice, and what does not:
+    10°        nothing. Everything within 10° of the centre lies inside the
+               drawn grid, so the 10° result is the same for any constants.
+    20°, 30°   these do. Over the tabulated weights the tree shrew ratio at
+               20° runs from about 5.9 to 7.0 (6.1 at the chosen weight) and
+               at 30° from about 3.8 to 4.9 (4.1 at the chosen weight). The
+               chosen weight sits toward the low, conservative end.
+
+  LAW_OVERRIDE pins (e2, k) to the values behind the delivered figure, which
+  were fitted on the first revision of the drawing. Set it to None to refit
+  on whatever drawing is supplied; summary.json reports that refit either
+  way, next to the values actually used.
+
 ASSUMPTIONS WORTH KNOWING  (all set in the CONFIG block)
-  • Tree shrew azimuth beyond +10° is extrapolated (step 4 above). The
-    power-law constants LAW_K and LAW_E2 are entered as already-fitted
-    values; the fit itself is not part of this script.
+  • Tree shrew azimuth beyond +10° is extrapolated (step 4 above). Its
+    constants are not measured from tree shrew data, which the drawing does
+    not have past +10°; they come from the stated balance described above.
   • The squirrel monkey's visual field is ASSUMED to be a full hemifield, so
     its ratio is an upper bound, and its curve rests on one published number
     from two animals.
@@ -75,7 +106,10 @@ OUTPUTS  (written to Fig5_outputs/ next to this script)
   overrepresentation.csv             pct_V1, uniform_pct and ratio per species and eccentricity
   treeshrew_vertex_retinotopy.csv    every mesh point: position (mm), azimuth, elevation
   summary.json                       the same numbers plus intermediate values (V1 areas,
-                                     fitted e2, mouse field extent and re-centring shift);
+                                     fitted e2, mouse field extent and re-centring shift)
+                                     and the azimuth law: the constants used, the refit on
+                                     this drawing, the table over LAW_SWEEP, and the
+                                     horizontal-meridian measurements it starts from;
                                      also printed when the script finishes
 
 USAGE
@@ -112,8 +146,18 @@ CONFIG = dict(
     # tree shrew azimuth extension
     AZ_RIM        = 120.0,                        # outermost azimuth printed in Kaas et al. 1980
     OUTER_LEVELS  = [20, 30, 45, 60, 90, 120],
-    LAW_K         = 1.0189,                       # fitted: M(az) ∝ az^-k outboard of 10°
-    LAW_E2        = 1e-6,                         # fit converged to e2 → 0
+    # Between the last drawn line (+10°) and the far border (AZ_RIM) no azimuth is drawn, so it
+    # is spread out by a law: cortex per degree M(az) ∝ ((az+e2)/e2)^-k. Its two constants
+    # (e2, k) are DERIVED by fit_azimuth_law() below — see its docstring. LAW_LAMBDA is the one
+    # free choice: how much weight to put on magnification being continuous at the 10° join,
+    # relative to the extrapolated contours being evenly spaced across the cortex. LAW_SWEEP
+    # lists other weights to tabulate in summary.json, to show what that choice does.
+    # LAW_OVERRIDE pins (e2, k) to the values used in the delivered figure (fitted at
+    # LAW_LAMBDA = 1.0 on the first SVG revision and carried through the later revisions
+    # unchanged); set it to None to refit on the SVG actually supplied.
+    LAW_LAMBDA    = 1.0,
+    LAW_SWEEP     = (0.0, 0.5, 1.0, 2.0, 4.0, 8.0, 20.0),
+    LAW_OVERRIDE  = dict(e2=1e-6, k=1.0189),
     CORNER_CLIP_MM= 1.0,                          # numerical fix at the upper corner only
     MESH_H_MM     = 0.055,
     # field extents used as ratio denominators (az0, az1, el0, el1), degrees
@@ -186,6 +230,89 @@ def tri_solid_angle_deg2(F, az, el):
     return 0.5*np.linalg.norm(cr, axis=1)*(180/np.pi)**2
 
 # ============================ tree shrew =====================================
+def hm_ladder(DRAWN_AZ, HM):
+    """Where each drawn azimuth line crosses the horizontal meridian (HM).
+
+    Returns (pos, s_far): pos maps each drawn azimuth (-10, -5, 0, 5, 10) to its
+    distance along HM in mm, and s_far is the distance along HM of the end that
+    lies at V1's far (peripheral) border. Together they are a ruler along HM:
+    how many mm the drawn 0-10° takes, and how many mm are left for 10-120°."""
+    hmL = LineString(HM)
+    pos = {}
+    for v, C in DRAWN_AZ.items():
+        it = hmL.intersection(LineString(C))
+        pt = it.centroid if not it.is_empty else nearest_points(hmL, LineString(C))[0]
+        pos[v] = float(hmL.project(pt))
+    s_far = 0.0 if abs(pos[0]-0.0) > abs(pos[0]-hmL.length) else hmL.length
+    return pos, s_far
+
+def fit_azimuth_law(DRAWN_AZ, HM, outer_levels, az_rim, lam, sweep=()):
+    """Derive (e2, k) of the magnification law M(az) ∝ ((az+e2)/e2)^-k used outboard of 10°.
+
+    WHY A LAW IS NEEDED. The drawing shows azimuth lines only out to +10°, but V1
+    continues to its far border, taken as az_rim (120°). The 110° in between has to
+    be laid out across the cortex that is left, and nothing in the drawing says how.
+    This function chooses the layout from two requirements and reports the choice.
+
+    THE PROBLEM. Measured along the horizontal meridian (see hm_ladder), the drawn
+    grid gives `w10` mm to azimuth 0-10°, at a nearly constant M_drawn = (s10 - s5)/5
+    mm per degree, and leaves `rem` mm before the far border for the remaining 110°.
+    Two desirable properties conflict:
+      (1) EVEN SPACING: the extrapolated contours (20, 30, 45, 60, 90, 120°) divide
+          `rem` into equal cortical steps, so the periphery is legible rather than
+          collapsing onto the border;
+      (2) CONTINUITY: M just outside 10° matches M_drawn, so there is no step in
+          magnification at the join.
+    Forcing (2) alone makes the single 10-20° interval consume ~64% of `rem` (the drawn
+    slope is far too shallow to continue into the periphery); forcing (1) alone gives
+    a 6.3x step at the join.
+
+    THE FIT. For a law f(a) = ((a+e2)/e2)^-k, the amplitude is fixed by the border:
+        M0 = rem / ∫_{10}^{az_rim} f(a) da,   so the contour at a sits at w10 + M0 ∫_{10}^{a} f.
+    (e2, k) are found by least squares on the residual vector
+        [ step_i / mean(step) - 1  for the six intervals ]  ++  [ lam * log(M0 f(10) / M_drawn) ]
+    i.e. criterion (1) as six residuals and criterion (2) as one residual weighted by `lam`.
+    `lam` is the single free choice. In this project a sweep over lam was tabulated and
+    lam = 1.0 chosen as the balance point: the 10-20° interval falls from 64% to 28% of
+    `rem` and the step at the join is 3.1x rather than 6.3x. At lam = 1.0 the fit drives
+    e2 -> 0 (the law becomes a pure power law in azimuth, i.e. contour spacing
+    ~logarithmic in cortical distance) with k = 1.0189 on the first SVG revision.
+
+    WHAT THIS IS NOT. (e2, k) are not measured from tree shrew data beyond 10°: there is
+    none in the drawing. They are the outcome of a stated compromise. The region within
+    10° of the centre lies entirely inside the drawn grid, so the 10° result does not
+    depend on them at all; the 20° and 30° results do.
+
+    Returns (best, table, geometry):
+      best      the fit at `lam`: e2, k, step_at_join (M_drawn divided by the law's M at
+                10°; 1 = no step), spacing_cv (unevenness of the six cortical steps;
+                0 = perfectly even), frac_10_20 (share of `rem` taken by 10-20°)
+      table     the same quantities for every weight in `sweep`
+      geometry  w10_mm, rem_mm and M_drawn_mm_per_deg measured along HM
+    """
+    from scipy.optimize import least_squares
+    pos, s_far = hm_ladder(DRAWN_AZ, HM)
+    w10 = abs(pos[10]-pos[0]); M_drawn = abs(pos[10]-pos[5])/5.0
+    rem = abs(s_far-pos[10])
+    def widths(e2, k):
+        f = lambda a: ((a+e2)/e2)**(-k)
+        M0 = rem/quad(f, 10, az_rim, limit=300)[0]
+        ws = np.array([M0*quad(f, 10, a, limit=300)[0] for a in outer_levels])
+        return M0, ws, f
+    def solve(l):
+        def resid(p):
+            e2, k = np.exp(p); M0, ws, f = widths(e2, k)
+            sg = np.diff(np.r_[0.0, ws])
+            return np.r_[sg/sg.mean()-1.0, l*np.log(max(M0*f(10), 1e-12)/M_drawn)]
+        p = least_squares(resid, np.log([5.0, 1.2]), bounds=(np.log([1e-6, 0.05]), np.log([1e3, 10])),
+                          xtol=1e-13).x
+        e2, k = np.exp(p); M0, ws, f = widths(e2, k); sg = np.diff(np.r_[0.0, ws])
+        return dict(lam=l, e2=e2, k=k, step_at_join=M_drawn/(M0*f(10)), spacing_cv=sg.std()/sg.mean(),
+                    frac_10_20=sg[0]/rem)
+    table = [solve(l) for l in sweep] if sweep else []
+    best = solve(lam)
+    return best, table, dict(w10_mm=w10, rem_mm=rem, M_drawn_mm_per_deg=M_drawn)
+
 def parse_svg(path):
     """Read the flat-map drawing.
 
@@ -240,7 +367,8 @@ def build_treeshrew(cfg):
       5. Azimuth: hold each drawn azimuth line at its value and the far border
          at AZ_RIM (120°), then interpolate smoothly everywhere else. Between
          the +10° line and the far border the result is re-spaced so that
-         cortex per degree declines as the power law set by LAW_K / LAW_E2.
+         cortex per degree declines as a power law. Its two constants come
+         from fit_azimuth_law (or are pinned by LAW_OVERRIDE).
       6. Elevation: hold each drawn elevation line at its value and interpolate
          smoothly everywhere else.
       7. Check that the interpolated azimuth reproduces every drawn azimuth
@@ -253,7 +381,9 @@ def build_treeshrew(cfg):
     (triangles), Ao (triangle areas, mm²), AZ and EL (azimuth and elevation at
     each mesh point, deg), OUT (V1 outline, mm), A_V1 (V1 area, mm²), DRAWN_AZ
     and DRAWN_EL (the drawn lines, keyed by their value in degrees), NEW (the
-    extrapolated azimuth lines, keyed by value)."""
+    extrapolated azimuth lines, keyed by value), and law_used / law_fit /
+    law_sweep / law_geom (the azimuth law's constants and how they were
+    derived; see fit_azimuth_law)."""
     paths, bar = parse_svg(cfg['TS_SVG'])
     MM = cfg['SCALE_BAR_MM']/bar
     is_red  = lambda p: p['stroke'] in ('#ed1c24', 'red')
@@ -320,8 +450,14 @@ def build_treeshrew(cfg):
         x[np.isnan(x)] = np.nanmean(x); return x
     far_idx = np.unique(tree.query(OUT[far_arc])[1])
     S = pin([(C, v) for v, C in DRAWN_AZ.items()], far_idx, cfg['AZ_RIM'])
-    # reparameterise 10..120 through the declining law so spacing follows magnification
-    e2, k = cfg['LAW_E2'], cfg['LAW_K']
+    # reparameterise 10..120 through the declining law so spacing follows magnification.
+    # (e2, k) are derived here — see fit_azimuth_law() — unless LAW_OVERRIDE pins them.
+    law, law_sweep, law_geom = fit_azimuth_law(DRAWN_AZ, HM, cfg['OUTER_LEVELS'], cfg['AZ_RIM'],
+                                               cfg['LAW_LAMBDA'], cfg['LAW_SWEEP'])
+    if cfg.get('LAW_OVERRIDE'):
+        e2, k = cfg['LAW_OVERRIDE']['e2'], cfg['LAW_OVERRIDE']['k']
+    else:
+        e2, k = law['e2'], law['k']
     f = lambda a: ((a+e2)/e2)**(-k); grid = np.linspace(10, cfg['AZ_RIM'], 400)
     cum = np.array([quad(f, 10, a, limit=200)[0] for a in grid]); cum /= cum[-1]
     AZ = np.where(S <= 10, S, np.interp(np.clip((S-10)/(cfg['AZ_RIM']-10), 0, 1), cum, grid))
@@ -345,7 +481,8 @@ def build_treeshrew(cfg):
         pieces = np.split(idx, br+1)
         NEW[l] = seg[max(pieces, key=len)]
     return dict(V=V, F=F, Ao=Ao, AZ=AZ, EL=EL, OUT=OUT, A_V1=A_V1, DRAWN_AZ=DRAWN_AZ,
-                DRAWN_EL=DRAWN_EL, NEW=NEW, T=T, CA=CA, CB=CB, MM=MM)
+                DRAWN_EL=DRAWN_EL, NEW=NEW, T=T, CA=CA, CB=CB, MM=MM,
+                law_used=dict(e2=e2, k=k), law_fit=law, law_sweep=law_sweep, law_geom=law_geom)
 
 def treeshrew_overrep(ts, cfg):
     """Tree shrew results table: one row per eccentricity in BANDS.
@@ -539,6 +676,8 @@ def main(cfg=CONFIG):
     fig.savefig(f"{cfg['OUT_DIR']}/figure5.png", dpi=400, bbox_inches='tight', bbox_extra_artists=labels)
     fig.savefig(f"{cfg['OUT_DIR']}/figure5.svg", bbox_inches='tight', bbox_extra_artists=labels)
     summary = dict(treeshrew_V1_mm2=ts['A_V1'], treeshrew=ts_tab.round(3).to_dict('records'),
+                   azimuth_law_used=ts['law_used'], azimuth_law_fit_on_this_svg=ts['law_fit'],
+                   azimuth_law_lambda_sweep=ts['law_sweep'], azimuth_law_hm_geometry=ts['law_geom'],
                    squirrelmonkey_e2_deg=e2, squirrelmonkey=sm_tab.round(3).to_dict('records'))
     if ms_tab is not None:
         summary.update(mouse_V1_mm2=ms_area, mouse_extent_az0_az1_el0_el1=ms_extent,
