@@ -60,7 +60,7 @@ no arguments: `python Python/paper_figures/<script>`. Each writes a PNG and an S
 | S3C–D | Torsion saccades by target position, two example sessions | `Fig3S_prosaccade_torsion.py` | paper manifest; raw sessions |
 | 4 | Cued fixation and fixation on a target with gaze feedback | `Fig4_fixation.py` | paper manifest; raw sessions |
 | S4 | Gaze heatmaps for three target positions | `Fig4S_fixation_heatmap.py` | paper manifest; raw sessions |
-| 5 | Share of V1 devoted to the central visual field: tree shrew, squirrel monkey, mouse | `Fig5_cortex.py` | `Python/paper_figures/Fig5_inputs/` (in this repository) |
+| 5 | Widefield retinotopy of tree shrew V1 in degrees; share of V1 devoted to the central visual field: tree shrew, squirrel monkey, mouse | `Fig5_cortex.py` | `Python/paper_figures/Fig5_inputs/` (in this repository) |
 | 6 | Extraocular muscle histology | none (no analysis code) | |
 
 Schematic panels (task diagrams, 3-D renders) are made in other software and are not
